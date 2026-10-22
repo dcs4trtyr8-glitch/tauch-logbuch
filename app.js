@@ -5,7 +5,7 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
@@ -89,6 +89,7 @@ const ICON = {
   calendar: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
   paste: svg('<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 11h6M9 15h4"/>'),
   qr: svg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>'),
+  stamp: svg('<path d="M9.5 3h5l-1 7h3.5a2 2 0 0 1 2 2v3H5v-3a2 2 0 0 1 2-2h3.5z"/><path d="M5 19h14"/>'),
 };
 
 /* ---------- Flaschen (ab 1.2 mehrere pro Tauchgang) ---------- */
@@ -516,6 +517,7 @@ const ROUTES = [
   [`logbuch/${ID}/bearbeiten`, id => pageDiveForm(id)],
   [`logbuch/${ID}/nachtragen`, id => pageDiveForm(id, { complete: true })],
   [`logbuch/${ID}/teilen`, id => pageDiveShare(id)],
+  [`logbuch/${ID}/stempel`, id => pageStampRequest(id)],
   [`logbuch/${ID}`, pageDiveDetail],
   ['buddys', () => pageBuddys()],
   ['buddys/teilen', () => pageMyCard()],
@@ -604,7 +606,7 @@ function diveItem(d) {
   return `<li><a class="dive-item${d.planned ? ' is-planned' : ''}" href="#logbuch/${d.id}">
       ${lead}
       <span class="dive-main">
-        <span class="dive-site">${esc(d.site)}</span>
+        <span class="dive-site">${d.stamps?.length ? '<span class="stamp-mini" title="Vom Buddy gestempelt">✓</span>' : ''}${esc(d.site)}</span>
         <span class="dive-date">${fmtDate(d.date)}${d.time ? ` · ${esc(d.time)}` : ''}${extra}</span>
       </span>
       ${figs}
@@ -979,6 +981,12 @@ async function pageDiveDetail(id) {
       ${d.notes ? `<h2 class="section-title">Notizen</h2><div class="card"><p class="notes">${esc(d.notes)}</p></div>` : ''}
       ${d.photos?.length ? `<h2 class="section-title">Fotos</h2><div class="photo-grid">
         ${d.photos.map((p, i) => `<img data-photo="${esc(p)}" data-zoom alt="Foto ${i + 1}">`).join('')}</div>` : ''}
+      ${d.planned ? '' : `<h2 class="section-title">Buddy-Stempel</h2>
+        ${(d.stamps || []).map((s, i) => `<div class="card stamp-card">
+            <div class="stamp" data-stamp="${i}"><span class="stamp-top">Buddy-Stempel</span><strong>${esc(s.signerName)}</strong><span>${esc(new Date(s.at).toLocaleDateString('de-DE'))}</span></div>
+            <p class="stamp-status" data-stamp-status="${i}">Wird geprüft …</p>
+          </div>`).join('')}
+        <a class="btn btn-primary btn-block" href="#logbuch/${d.id}/stempel">${ICON.stamp}${d.stamps?.length ? 'Weiteren Stempel anfordern' : 'Buddy-Stempel anfordern'}</a>`}
       ${d.planned ? `<a class="btn btn-primary btn-big btn-block" href="#logbuch/${d.id}/nachtragen" style="margin-top:18px">${ICON.edit}Tauchgang nachtragen</a>` : ''}
       <a class="btn btn-block" href="#logbuch/${d.id}/teilen" style="margin-top:${d.planned ? 10 : 18}px">${ICON.share}Mit Buddy teilen</a>
       <div class="btn-row" style="margin-top:10px">
@@ -986,6 +994,14 @@ async function pageDiveDetail(id) {
         <a class="btn${d.planned ? '' : ' btn-primary'}" href="#logbuch/${d.id}/bearbeiten">${ICON.edit}Bearbeiten</a>
       </div>`,
     after(view) {
+      (d.stamps || []).forEach(async (s, i) => {
+        const st = await stampStatus(d, s);
+        const el = $(`[data-stamp-status="${i}"]`, view);
+        if (!el) return;
+        el.textContent = st.text;
+        el.classList.add(`stamp-${st.level}`);
+        $(`[data-stamp="${i}"]`, view).classList.add(`stamp-${st.level}`);
+      });
       $('[data-delete]', view).addEventListener('click', async () => {
         const ok = await confirmDialog({
           title: d.planned ? 'Planung löschen?' : 'Tauchgang löschen?',
@@ -1431,6 +1447,7 @@ async function exportBackup() {
   try {
     const data = { format: BACKUP_FORMAT, version: 1, app: APP_VERSION, exportedAt: new Date().toISOString(), testmodus: testMode, stores: {}, photos: [] };
     for (const s of DATA_STORES) data.stores[s] = await dbAll(s);
+    data.stores.kv = data.stores.kv.filter(r => r.id !== 'signKey');   // privater Stempel-Schlüssel bleibt auf dem Gerät
     for (const p of await dbAll('photos')) data.photos.push({ id: p.id, data: await blobToDataURL(p.blob) });
     file = new File([JSON.stringify(data)], `tauch-logbuch-backup-${todayISO()}${testMode ? '-TESTMODUS' : ''}.json`, { type: 'application/json' });
   } catch (err) {
@@ -1679,7 +1696,7 @@ async function unpackShare(kind, data) {
   let bytes = fromB64url(data);
   if (kind === '1') bytes = await pipeBytes(bytes, new DecompressionStream('deflate-raw'));
   const obj = JSON.parse(new TextDecoder().decode(bytes));
-  if (obj?.app !== 'tlb' || !['buddy', 'dive'].includes(obj.t)) throw new Error('kein Tauch-Logbuch-Code');
+  if (obj?.app !== 'tlb' || !['buddy', 'dive', 'stampreq', 'stamp'].includes(obj.t)) throw new Error('kein Tauch-Logbuch-Code');
   return obj;
 }
 async function decodeShare(text) {
@@ -1738,20 +1755,27 @@ const shareBox = () => `<div class="card">
     <p class="hint">Am Tauchplatz am einfachsten: <strong>QR-Code zeigen</strong>, dein Buddy scannt ihn in seiner App unter Buddys → „QR-Code scannen“. Kein Telefonnummern-Tausch nötig.</p>
   </div>`;
 
-async function showQR(text) {
+async function qrDataURL(text) {
   await loadScript('lib/qrcode.js');
-  let qr = null;
   for (const level of ['M', 'L']) {
-    try { qr = qrcode(0, level); qr.addData(text, 'Byte'); qr.make(); break; } catch { qr = null; }
+    try {
+      const qr = qrcode(0, level);
+      qr.addData(text, 'Byte');
+      qr.make();
+      return qr.createDataURL(Math.max(2, Math.floor(640 / qr.getModuleCount())), 4);
+    } catch { /* nächste Fehlerkorrektur-Stufe */ }
   }
-  if (!qr) { toast('Zu viele Daten für einen QR-Code', 4000, true); return; }
-  const src = qr.createDataURL(Math.max(2, Math.floor(640 / qr.getModuleCount())), 4);
-  await modal({
-    title: 'QR-Code für deinen Buddy',
-    html: `<div class="qr-box"><img src="${src}" alt="QR-Code"></div>
-      <p>Dein Buddy öffnet in seiner App <strong>Buddys → QR-Code scannen</strong>. Tipp: Bildschirm hell stellen.</p>`,
-    buttons: [{ label: 'Fertig', value: true, cls: 'btn-primary' }],
+  throw new Error('Zu viele Daten für einen QR-Code');
+}
+// hint ist HTML – Aufrufer escapen selbst
+async function showQR(text, { title = 'QR-Code für deinen Buddy', hint = 'Dein Buddy öffnet in seiner App <strong>Buddys → QR-Code scannen</strong>.', message = '' } = {}) {
+  const src = await qrDataURL(text);
+  const choice = await modal({
+    title,
+    html: `<div class="qr-box"><img src="${src}" alt="QR-Code"></div><p>${hint} Tipp: Bildschirm hell stellen.</p>`,
+    buttons: [...(message ? [{ label: 'Als Nachricht', value: 'message' }] : []), { label: 'Fertig', value: true, cls: 'btn-primary' }],
   });
+  if (choice === 'message') await shareText(message, title);
 }
 function bindShareBox(view, form, build, title) {
   const info = $('[data-code-info]', view);
@@ -1840,7 +1864,8 @@ async function pageBuddyDetail(id) {
     title: b.name,
     back: 'buddys',
     html: `<div class="detail-head"><h2>${esc(b.name)}</h2>
-        <p>${b.sharedAt ? `Stand: ${esc(fmtDateTime(b.sharedAt))}` : 'Noch keine Buddy-Karte erhalten'}</p></div>
+        <p>${b.sharedAt ? `Stand: ${esc(fmtDateTime(b.sharedAt))}` : 'Noch keine Buddy-Karte erhalten'}</p>
+        ${b.key ? '<p data-fp></p>' : ''}</div>
       ${s ? `<div class="tiles">
           ${tile('Tauchgänge', esc(s.count))}
           ${tile('Letzter Tauchgang', s.last ? fmtDate(s.last.date) : '–')}
@@ -1860,6 +1885,8 @@ async function pageBuddyDetail(id) {
       <a class="btn btn-primary btn-block" href="#logbuch/plan/${esc(b.id)}" style="margin-top:18px">${ICON.calendar}Tauchgang mit ${esc(b.name)} planen</a>
       <button type="button" class="btn btn-outline-danger btn-block" data-delete style="margin-top:10px">${ICON.trash}Buddy entfernen</button>`,
     after(view) {
+      const fpEl = $('[data-fp]', view);
+      if (fpEl) keyFp(b.key).then(fp => { fpEl.textContent = `Stempel-Schlüssel: ${fp}`; });
       $('[data-delete]', view).addEventListener('click', async () => {
         const ok = await confirmDialog({ title: 'Buddy entfernen?', text: `${b.name} und die geteilten Daten werden von diesem Handy gelöscht. Deine Tauchgänge bleiben.`, ok: 'Entfernen', danger: true });
         if (!ok) return;
@@ -1883,7 +1910,7 @@ async function cardPhoto(id) {
 }
 
 async function buildMyCard(me, prefs, photoLevel = PHOTO_LEVELS[0]) {
-  const card = { t: 'buddy', id: me.id, name: me.name, at: new Date().toISOString() };
+  const card = { t: 'buddy', id: me.id, name: me.name, key: (await getSigner()).publicJwk, at: new Date().toISOString() };
   if (prefs.stats) {
     const dives = (await dbAll('dives')).filter(d => !d.planned);
     const last = sortDives(dives)[0];
@@ -1922,11 +1949,13 @@ async function pageMyCard() {
           ${check('certs', `Brevets (${nCerts})`, 'Organisation, Stufe, Datum, Brevet-Nummer', prefs.certs)}
           ${check('photos', 'Brevet-Fotos mitschicken', 'Vorderseite als kleines Bild – die Nachricht wird deutlich länger', prefs.photos)}
           <p class="hint">Nie geteilt: Notfalldaten, Notfallkontakte, Notizen und Tauchgang-Fotos.</p>
+          <p class="hint" data-fp></p>
         </fieldset>
       </form>
       ${shareBox()}`,
     after(view) {
       const form = $('#card-form', view);
+      getSigner().then(s => keyFp(s.publicJwk)).then(fp => { $('[data-fp]', view).textContent = `Dein Stempel-Schlüssel: ${fp} – daran erkennt dein Buddy deine Stempel.`; });
       bindShareBox(view, form, async fd => {
         const p = { stats: fd.has('stats'), certs: fd.has('certs'), photos: fd.has('photos') };
         await setKV('sharePrefs', p);
@@ -1987,6 +2016,21 @@ async function pageDiveShare(id) {
 
 /* ---------- Code empfangen ---------- */
 async function importPreview(obj) {
+  if (obj.t === 'stampreq') {
+    const d = obj.dive || {};
+    return `<div class="card"><div class="cert-org">Stempel-Anfrage von ${esc(obj.from?.name)}</div>
+      <div class="cert-level">${esc(d.site)}</div>
+      <p class="meta-line">${fmtDate(cleanStr(d.date, 10))}${d.time ? `, ${esc(d.time)} Uhr` : ''} · ${dispU('depth', cleanNum(d.maxDepth))} · ${cleanNum(d.duration) != null ? `${fmt(cleanNum(d.duration), 0)} min` : '–'}</p>
+      <p class="hint" style="margin:0 0 12px">Nur abstempeln, wenn du bei diesem Tauchgang wirklich dabei warst. Dein Handy unterschreibt die Angaben digital.</p>
+      <button type="button" class="btn btn-primary btn-big btn-block" data-apply>${ICON.stamp}Abstempeln</button></div>`;
+  }
+  if (obj.t === 'stamp') {
+    const ok = await verifyStamp(obj);
+    return `<div class="card"><div class="cert-org">Buddy-Stempel von ${esc(obj.signerName)}</div>
+      <div class="cert-level">${esc(obj.site)}</div>
+      <p class="meta-line">${fmtDate(cleanStr(obj.date, 10))} · ${ok ? '✓ Unterschrift gültig' : '✗ Unterschrift ungültig'}</p>
+      ${ok ? `<button type="button" class="btn btn-primary btn-big btn-block" data-apply>${ICON.stamp}Stempel übernehmen</button>` : ''}</div>`;
+  }
   if (obj.t === 'buddy') {
     const existing = cleanId(obj.id) ? await dbGet('buddies', obj.id) : null;
     const s = obj.stats;
@@ -2008,13 +2052,19 @@ async function importPreview(obj) {
 }
 function bindImport(root, obj) {
   $('[data-apply]', root)?.addEventListener('click', async () => {
-    try { navigate(await applyShare(obj), { replace: true }); }
-    catch (e) { toast(e.message, 4000, true); }
+    try {
+      const path = await applyShare(obj);
+      if (path) navigate(path, { replace: true });
+    } catch (e) {
+      toast(e.message, 4500, true);
+    }
   });
 }
 
 async function applyShare(obj) {
   const me = await getMe();
+  if (obj.t === 'stampreq') return giveStamp(obj, me);
+  if (obj.t === 'stamp') return acceptStamp(obj, me);
   if (obj.t === 'buddy') {
     const id = cleanId(obj.id);
     if (!id) throw new Error('Der Code ist ungültig.');
@@ -2024,6 +2074,7 @@ async function applyShare(obj) {
     const rec = {
       id,
       name: cleanStr(obj.name, 80) || 'Buddy',
+      key: validJwk(obj.key) || old?.key || null,   // öffentlicher Stempel-Schlüssel
       // Was der Buddy nicht mehr freigibt, wird hier auch entfernt
       certs: Array.isArray(obj.certs) ? obj.certs.slice(0, 50).map(c => ({
         org: cleanStr(c.org), level: cleanStr(c.level), date: cleanStr(c.date, 10), number: cleanStr(c.number, 60),
@@ -2137,64 +2188,231 @@ function stopCamera() {
   if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
 }
 
+// Kamera starten und QR-Codes lesen, bis ein gültiger Tauch-Logbuch-Code erkannt wird.
+// Erwartet in view: .scan-box mit <video> und [data-scan-info].
+async function startScanner(view, onCode) {
+  const box = $('.scan-box', view);
+  const video = $('video', box);
+  const info = $('[data-scan-info]', view);
+  box.hidden = false;
+  info.textContent = 'Kamera wird gestartet …';
+  try {
+    await loadScript('lib/jsQR.js');
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Dieser Browser erlaubt keinen Kamerazugriff.');
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    if (!view.isConnected) { stream.getTracks().forEach(t => t.stop()); return; }   // inzwischen weiternavigiert
+    stopCamera();
+    camStream = stream;
+  } catch (e) {
+    box.hidden = true;
+    info.textContent = e.name === 'NotAllowedError'
+      ? 'Kein Zugriff auf die Kamera. Bitte erlauben (iPhone: Einstellungen → Apps → Safari → Kamera) und erneut versuchen.'
+      : `Kamera nicht verfügbar: ${e.message}`;
+    return;
+  }
+  video.srcObject = camStream;
+  await video.play().catch(() => {});
+  info.textContent = 'Halte die Kamera auf den QR-Code deines Buddys.';
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  let busy = false;
+  const tick = async () => {
+    if (!camStream || !view.isConnected) return;
+    if (!busy && video.readyState >= 2 && video.videoWidth) {
+      const scale = Math.min(1, 800 / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const hit = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, { inversionAttempts: 'dontInvert' });
+      if (hit?.data) {
+        busy = true;
+        try {
+          const obj = await decodeShare(hit.data);
+          stopCamera();
+          navigator.vibrate?.(80);
+          box.hidden = true;
+          info.textContent = 'QR-Code erkannt:';
+          await onCode(obj);
+          return;
+        } catch (e) {
+          info.textContent = `${e.message} – weiter scannen …`;
+        }
+        busy = false;
+      }
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 async function pageScan() {
   return {
     title: 'QR-Code scannen',
     back: 'buddys',
-    html: `<div class="scan-box"><video playsinline muted></video><div class="scan-frame"></div></div>
-      <p class="meta-line" data-scan-info style="margin-top:12px">Kamera wird gestartet …</p>
+    html: `<div class="scan-box" hidden><video playsinline muted></video><div class="scan-frame"></div></div>
+      <p class="meta-line" data-scan-info style="margin-top:12px"></p>
       <div id="import-preview"></div>`,
-    async after(view) {
-      const video = $('video', view);
-      const info = $('[data-scan-info]', view);
+    after(view) {
       const out = $('#import-preview', view);
-      try {
-        await loadScript('lib/jsQR.js');
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Dieser Browser erlaubt keinen Kamerazugriff.');
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-        if (!view.isConnected) { stream.getTracks().forEach(t => t.stop()); return; }   // inzwischen weiternavigiert
-        stopCamera();
-        camStream = stream;
-      } catch (e) {
-        info.textContent = e.name === 'NotAllowedError'
-          ? 'Kein Zugriff auf die Kamera. Bitte erlauben (iPhone: Einstellungen → Apps → Safari → Kamera) und erneut versuchen.'
-          : `Kamera nicht verfügbar: ${e.message}`;
-        return;
-      }
-      video.srcObject = camStream;
-      await video.play().catch(() => {});
-      info.textContent = 'Halte die Kamera auf den QR-Code deines Buddys.';
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      let busy = false;
-      const tick = async () => {
-        if (!camStream || !view.isConnected) return;
-        if (!busy && video.readyState >= 2 && video.videoWidth) {
-          const scale = Math.min(1, 800 / Math.max(video.videoWidth, video.videoHeight));
-          canvas.width = Math.round(video.videoWidth * scale);
-          canvas.height = Math.round(video.videoHeight * scale);
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const hit = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, { inversionAttempts: 'dontInvert' });
-          if (hit?.data) {
-            busy = true;
-            try {
-              const obj = await decodeShare(hit.data);
-              stopCamera();
-              navigator.vibrate?.(80);
-              $('.scan-box', view).hidden = true;
-              info.textContent = 'QR-Code erkannt:';
-              out.innerHTML = await importPreview(obj);
-              bindImport(out, obj);
-              return;
-            } catch (e) {
-              info.textContent = `${e.message} – weiter scannen …`;
-            }
-            busy = false;
-          }
-        }
-        requestAnimationFrame(tick);
+      startScanner(view, async obj => {
+        out.innerHTML = await importPreview(obj);
+        bindImport(out, obj);
+      });
+    },
+  };
+}
+
+/* ---------- Digitaler Buddy-Stempel ----------
+   Jedes Handy hat ein eigenes Schlüsselpaar (ECDSA P-256). Der private Schlüssel verlässt das Gerät nie
+   (auch nicht im Backup); der öffentliche reist mit der Buddy-Karte und mit jedem Stempel. */
+const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' };
+const SIGN = { name: 'ECDSA', hash: 'SHA-256' };
+const STAMP_FIELDS = ['date', 'time', 'site', 'maxDepth', 'duration'];
+const STAMP_LABELS = { date: 'Datum', time: 'Uhrzeit', site: 'Tauchplatz', maxDepth: 'Tiefe', duration: 'Tauchzeit' };
+const validJwk = k => (k?.kty === 'EC' && k.crv === 'P-256' && /^[\w-]{40,50}$/.test(k.x || '') && /^[\w-]{40,50}$/.test(k.y || '')
+  ? { kty: 'EC', crv: 'P-256', x: k.x, y: k.y } : null);
+const sameKey = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y;
+
+async function getSigner() {
+  const saved = await getKV('signKey');
+  if (saved?.publicJwk && (saved.privateKey || saved.privateJwk)) return saved;
+  const pair = await crypto.subtle.generateKey(ECDSA, false, ['sign', 'verify']);
+  const publicJwk = validJwk(await crypto.subtle.exportKey('jwk', pair.publicKey));
+  let signer = { privateKey: pair.privateKey, publicJwk };
+  try {
+    await setKV('signKey', signer);
+  } catch {
+    // Falls der Browser Schlüssel-Objekte nicht speichern kann: als JWK ablegen
+    const pair2 = await crypto.subtle.generateKey(ECDSA, true, ['sign', 'verify']);
+    signer = { privateJwk: await crypto.subtle.exportKey('jwk', pair2.privateKey), publicJwk: validJwk(await crypto.subtle.exportKey('jwk', pair2.publicKey)) };
+    await setKV('signKey', signer);
+  }
+  return signer;
+}
+async function keyFp(jwk) {
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${jwk.x}.${jwk.y}`)));
+  const hex = [...hash.slice(0, 4)].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+  return `${hex.slice(0, 4)} ${hex.slice(4)}`;
+}
+const stampMessage = s => new TextEncoder().encode(['TLBSTAMP', 1, s.diver, s.sid, s.date, s.time, s.site, s.maxDepth, s.duration,
+  s.signerId, s.signerName, s.at, s.nonce].map(v => String(v ?? '')).join('|'));
+async function verifyStamp(s) {
+  try {
+    const jwk = validJwk(s.key);
+    if (!jwk || !s.sig) return false;
+    const key = await crypto.subtle.importKey('jwk', { ...jwk, ext: true }, ECDSA, false, ['verify']);
+    return await crypto.subtle.verify(SIGN, key, fromB64url(s.sig), stampMessage(s));
+  } catch {
+    return false;
+  }
+}
+
+// Buddy-Seite: Anfrage abstempeln und Stempel-QR zeigen
+async function giveStamp(req, me) {
+  if (!me.name) throw new Error('Bitte zuerst unter Buddys → „Meine Buddy-Karte“ deinen Namen eintragen.');
+  const diver = cleanId(req.from?.id);
+  const sid = cleanId(req.dive?.sid);
+  if (!diver || !sid) throw new Error('Die Stempel-Anfrage ist ungültig.');
+  if (diver === me.id) throw new Error('Das ist dein eigener Tauchgang – den muss dein Buddy abstempeln.');
+  const d = req.dive;
+  const signer = await getSigner();
+  const stamp = {
+    t: 'stamp', diver, sid,
+    date: cleanStr(d.date, 10), time: cleanStr(d.time, 5), site: cleanStr(d.site), maxDepth: cleanNum(d.maxDepth), duration: cleanNum(d.duration),
+    signerId: me.id, signerName: me.name, key: signer.publicJwk, at: new Date().toISOString(), nonce: cleanStr(req.nonce, 40),
+  };
+  const sigKey = signer.privateKey || await crypto.subtle.importKey('jwk', signer.privateJwk, ECDSA, false, ['sign']);
+  stamp.sig = b64url(new Uint8Array(await crypto.subtle.sign(SIGN, sigKey, stampMessage(stamp))));
+  const link = shareLink(await encodeShare(stamp));
+  const diverName = cleanStr(req.from?.name, 80) || 'deinen Buddy';
+  await showQR(link, {
+    title: `Dein Stempel für ${diverName}`,
+    hint: `${esc(diverName)} scannt diesen Code auf der Stempel-Seite seines Tauchgangs.`,
+    message: `🤿 Buddy-Stempel von ${me.name} für ${stamp.site}, ${fmtDate(stamp.date)}.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${link}`,
+  });
+  return null;
+}
+
+// Taucher-Seite: Stempel prüfen und am Tauchgang speichern
+async function acceptStamp(obj, me) {
+  if (cleanId(obj.diver) !== me.id) throw new Error('Dieser Stempel gehört zu einem anderen Taucher.');
+  const dive = (await dbAll('dives')).find(d => d.id === obj.sid || d.shareId === obj.sid);
+  if (!dive) throw new Error('Den gestempelten Tauchgang gibt es auf diesem Handy nicht.');
+  const signerId = cleanId(obj.signerId);
+  if (!signerId || !(await verifyStamp(obj))) throw new Error('Stempel ungültig – die digitale Unterschrift passt nicht.');
+  const stamp = { key: validJwk(obj.key), sig: String(obj.sig) };
+  for (const k of ['diver', 'sid', ...STAMP_FIELDS, 'signerId', 'signerName', 'at', 'nonce']) stamp[k] = obj[k] ?? null;
+  const buddy = await dbGet('buddies', signerId);
+  const rec = { ...dive, stamps: [...(dive.stamps || []).filter(s => s.signerId !== signerId), stamp], updated: Date.now() };
+  await dbWrite(['dives', 'buddies'], t => {
+    t.objectStore('dives').put(rec);
+    // Unbekannter Stempelgeber wird Buddy; fehlt der Schlüssel noch, wird er jetzt gemerkt
+    if (!buddy) t.objectStore('buddies').put({ id: signerId, name: cleanStr(obj.signerName, 80), key: stamp.key, certs: [], stats: null, sharedAt: '', receivedAt: new Date().toISOString(), created: Date.now() });
+    else if (!buddy.key) t.objectStore('buddies').put({ ...buddy, key: stamp.key });
+  });
+  toast(`Gestempelt von ${stamp.signerName} ✓`);
+  return `logbuch/${dive.id}`;
+}
+
+async function stampStatus(d, s) {
+  if (!(await verifyStamp(s))) return { level: 'bad', text: '✗ Ungültig – die Unterschrift passt nicht.' };
+  const changed = STAMP_FIELDS.filter(k => String(s[k] ?? '') !== String(d[k] ?? ''));
+  if (changed.length) return { level: 'warn', text: `⚠ Der Tauchgang wurde nach dem Stempel geändert (${changed.map(k => STAMP_LABELS[k]).join(', ')}).` };
+  const fp = await keyFp(s.key);
+  const buddy = await dbGet('buddies', s.signerId);
+  if (buddy?.key && !sameKey(buddy.key, s.key)) return { level: 'warn', text: `⚠ Unterschrift gültig, aber der Schlüssel (${fp}) passt nicht zur Buddy-Karte von ${buddy.name}.` };
+  return { level: 'ok', text: `✓ Echt – Unterschrift geprüft · ${fmtDateTime(s.at)} · Schlüssel ${fp}` };
+}
+
+async function pageStampRequest(id) {
+  const d = await dbGet('dives', id);
+  if (!d) return notFound('logbuch');
+  const name = await defaultName();
+  return {
+    title: 'Buddy-Stempel',
+    back: `logbuch/${id}`,
+    html: name ? `<div class="card"><div class="cert-org">Schritt 1 · Dein Buddy scannt</div>
+        <p class="meta-line" style="margin-top:6px">${esc(d.site)} · ${fmtDate(d.date)} · ${dispU('depth', d.maxDepth)} · ${d.duration != null ? `${fmt(d.duration, 0)} min` : '–'}</p>
+        <div class="qr-box"><img data-req-qr alt="QR-Code Stempel-Anfrage"></div>
+        <p class="hint" style="margin:0">Dein Buddy öffnet <strong>Buddys → QR-Code scannen</strong> und tippt auf „Abstempeln“.</p>
+        <button type="button" class="btn btn-block" data-req-share style="margin-top:12px">${ICON.share}Anfrage als Nachricht schicken</button>
+      </div>
+      <div class="card"><div class="cert-org">Schritt 2 · Stempel scannen</div>
+        <p class="meta-line" style="margin-top:6px">Sein Handy zeigt dann den Stempel als QR-Code. Scanne ihn hier.</p>
+        <button type="button" class="btn btn-primary btn-big btn-block" data-scan-stamp>${ICON.qr}Stempel scannen</button>
+        <div class="scan-box" hidden style="margin-top:12px"><video playsinline muted></video><div class="scan-frame"></div></div>
+        <p class="meta-line" data-scan-info style="margin:10px 0 0"></p>
+        <div id="import-preview"></div>
+      </div>`
+      : `<div class="notice"><p>Trag zuerst unter Buddys → „Meine Buddy-Karte“ deinen Namen ein.</p><a class="btn btn-small" href="#buddys/teilen">Öffnen</a></div>`,
+    async after(view) {
+      if (!name) return;
+      const me = await getMe();
+      if (!me.name) await setKV('me', { ...me, name });
+      const req = {
+        t: 'stampreq', from: { id: me.id, name },
+        dive: { sid: d.shareId || d.id, date: d.date, time: d.time, site: d.site, location: d.location, maxDepth: d.maxDepth, duration: d.duration },
+        nonce: b64url(crypto.getRandomValues(new Uint8Array(9))),
       };
-      requestAnimationFrame(tick);
+      const link = shareLink(await encodeShare(req));
+      $('[data-req-qr]', view).src = await qrDataURL(link);
+      $('[data-req-share]', view).addEventListener('click', () => shareText(
+        `🤿 ${name} bittet um deinen Buddy-Stempel für ${d.site}, ${fmtDate(d.date)}.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${link}`, 'Stempel-Anfrage'));
+      const scanBtn = $('[data-scan-stamp]', view);
+      scanBtn.addEventListener('click', () => {
+        scanBtn.hidden = true;
+        const info = $('[data-scan-info]', view);
+        const out = $('#import-preview', view);
+        startScanner(view, async obj => {
+          if (obj.t !== 'stamp') { out.innerHTML = await importPreview(obj); bindImport(out, obj); return; }
+          try {
+            navigate(await acceptStamp(obj, await getMe()), { replace: true });
+          } catch (e) {
+            info.textContent = e.message;
+            scanBtn.hidden = false;
+          }
+        });
+      });
     },
   };
 }

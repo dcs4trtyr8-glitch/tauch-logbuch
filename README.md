@@ -97,6 +97,15 @@ Beliebig viele Flaschen pro Tauchgang (z. B. Stage oder Deko), jeweils mit Schie
 
 Bei geplanten Tauchgängen: Atemminutenvolumen (SAC), Aufstiegsgeschwindigkeit, Reserve und Sicherheitsstopp einstellen. Die App rechnet Grundzeit, Aufstiegsdauer und Gaswechsel (bei ppO₂ 1,6, auf 3 m abgerundet), dazu den Gasbedarf pro Flasche samt Enddruck und die EAD. Sie zeigt ein kleines Profil und warnt bei zu hohem ppO₂ oder zu wenig Gas. **Keine Dekompressionsberechnung** – Nullzeit und Deko-Stopps immer mit dem Tauchcomputer planen.
 
+## Digitaler Buddy-Stempel (ab 1.4)
+
+Statt Stempel im Papier-Logbuch:
+1. Tauchgang öffnen → **Buddy-Stempel anfordern**. Das Handy zeigt einen QR-Code.
+2. Der Buddy scannt ihn (Buddys → QR-Code scannen) und tippt auf **Abstempeln**. Sein Handy unterschreibt Datum, Uhrzeit, Platz, Tiefe und Zeit digital und zeigt einen Stempel-QR.
+3. Auf der Stempel-Seite **Stempel scannen**, fertig.
+
+Jedes Handy hat ein eigenes Schlüsselpaar (ECDSA P-256 über die Web-Crypto-Schnittstelle des Browsers). Der private Schlüssel verlässt das Gerät nie, auch nicht im Backup. Die App erkennt gefälschte Stempel, nachträglich geänderte Tauchgänge und Schlüssel, die nicht zur Buddy-Karte passen. Auf einem neuen Handy entsteht ein neuer Schlüssel; alte Stempel bleiben gültig. Fern-Stempeln geht auch per Nachricht („Anfrage als Nachricht schicken“ bzw. „Als Nachricht“).
+
 ## 6. Später etwas ändern
 
 1. Dateien hier bearbeiten.

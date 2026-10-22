@@ -5,7 +5,7 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
@@ -13,6 +13,8 @@ const STORES = ['dives', 'certs', 'hotlines', 'contacts', 'photos', 'kv', 'buddi
 const DATA_STORES = ['dives', 'certs', 'hotlines', 'contacts', 'kv', 'buddies'];
 const BACKUP_FORMAT = 'tauch-logbuch-backup';
 const SHARE_RE = /TLB([01]):([A-Za-z0-9_-]+)/;   // Buddy-Code: TLB1 = komprimiert, TLB0 = unkomprimiert
+const MAX_MESSAGE = 60000;                         // WhatsApp kürzt Nachrichten über 65.536 Zeichen
+const PHOTO_LEVELS = [[560, 0.6], [440, 0.5], [340, 0.45], [260, 0.4], [200, 0.35]];   // [px, JPEG-Qualität]
 const DEFAULT_SETTINGS = { depth: 'm', pressure: 'bar', temp: 'C', weight: 'kg' };
 
 const DAN_NUMMER = '+39 06 4211 5685';
@@ -1445,10 +1447,10 @@ function bindShareBox(view, form, build, title) {
     bShare.disabled = bCopy.disabled = true;
     info.textContent = 'Code wird erstellt …';
     try {
-      const m = await build(new FormData(form));
+      const r = await build(new FormData(form));
       if (mine !== seq) return;
-      message = m;
-      info.textContent = `Fertig – Nachricht mit ${fmt(m.length / 1024)} KB Text.`;
+      message = typeof r === 'string' ? r : r.message;
+      info.textContent = `Fertig – Nachricht mit ${fmt(message.length / 1024)} KB Text.${r.note ? ' ' + r.note : ''}`;
       bShare.disabled = bCopy.disabled = false;
     } catch (e) {
       if (mine === seq) info.textContent = e.message;
@@ -1543,7 +1545,17 @@ async function pageBuddyDetail(id) {
 }
 
 /* ---------- Meine Buddy-Karte ---------- */
-async function buildMyCard(me, prefs) {
+// Brevet-Fotos einmal auf die größte Teilen-Stufe verkleinern; kleinere Stufen entstehen daraus schnell
+const cardPhotoCache = new Map();
+async function cardPhoto(id) {
+  if (!cardPhotoCache.has(id)) {
+    const p = await dbGet('photos', id);
+    cardPhotoCache.set(id, p ? await resizeImage(p.blob, PHOTO_LEVELS[0][0], 0.9) : null);
+  }
+  return cardPhotoCache.get(id);
+}
+
+async function buildMyCard(me, prefs, photoLevel = PHOTO_LEVELS[0]) {
   const card = { t: 'buddy', id: me.id, name: me.name, at: new Date().toISOString() };
   if (prefs.stats) {
     const dives = (await dbAll('dives')).filter(d => !d.planned);
@@ -1561,8 +1573,8 @@ async function buildMyCard(me, prefs) {
     for (const c of certs) {
       const x = { org: c.org, level: c.level, date: c.date, number: c.number };
       if (prefs.photos && c.front) {
-        const p = await dbGet('photos', c.front);
-        if (p) x.img = await blobToDataURL(await resizeImage(p.blob, 560, 0.6));
+        const small = await cardPhoto(c.front);
+        if (small) x.img = await blobToDataURL(await resizeImage(small, ...photoLevel));
       }
       card.certs.push(x);
     }
@@ -1592,8 +1604,21 @@ async function pageMyCard() {
         const p = { stats: fd.has('stats'), certs: fd.has('certs'), photos: fd.has('photos') };
         await setKV('sharePrefs', p);
         const me = await myName(fd);
-        const code = await encodeShare(await buildMyCard(me, p));
-        return `🤿 Buddy-Karte von ${me.name} für das Tauch-Logbuch.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${shareLink(code)}`;
+        const make = async (photos, level) => {
+          const code = await encodeShare(await buildMyCard(me, { ...p, photos }, level));
+          return `🤿 Buddy-Karte von ${me.name} für das Tauch-Logbuch.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${shareLink(code)}`;
+        };
+        // Fotos schrittweise verkleinern, bis die Nachricht vollständig in WhatsApp passt
+        if (p.photos && p.certs) {
+          for (const level of PHOTO_LEVELS) {
+            const message = await make(true, level);
+            if (message.length <= MAX_MESSAGE) {
+              return { message, note: level === PHOTO_LEVELS[0] ? '' : 'Fotos wurden stärker verkleinert, damit alles in eine Nachricht passt.' };
+            }
+          }
+          return { message: await make(false), note: 'Die Fotos sind zu groß für eine Nachricht und wurden weggelassen.' };
+        }
+        return make(false);
       }, 'Buddy-Karte');
     },
   };

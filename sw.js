@@ -1,7 +1,7 @@
 /* Service Worker – macht das Logbuch offline nutzbar.
    Bei jeder Änderung an den App-Dateien CACHE hochzählen (v2, v3 …),
    damit Handys die neue Version sicher übernehmen. */
-const CACHE = 'tauch-logbuch-v2';
+const CACHE = 'tauch-logbuch-v4';
 
 // Bewusst ohne "./index.html": manche Server leiten /index.html auf / um,
 // und umgeleitete Antworten dürfen nicht für Seitenaufrufe benutzt werden.

@@ -1,7 +1,7 @@
 /* Service Worker – macht das Logbuch offline nutzbar.
    Bei jeder Änderung an den App-Dateien CACHE hochzählen (v2, v3 …),
    damit Handys die neue Version sicher übernehmen. */
-const CACHE = 'tauch-logbuch-v4';
+const CACHE = 'tauch-logbuch-v6';
 
 // Bewusst ohne "./index.html": manche Server leiten /index.html auf / um,
 // und umgeleitete Antworten dürfen nicht für Seitenaufrufe benutzt werden.
@@ -13,6 +13,8 @@ const ASSETS = [
   './icons/icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './lib/qrcode.js',
+  './lib/jsQR.js',
 ];
 
 self.addEventListener('install', event => {

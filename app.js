@@ -5,7 +5,7 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
@@ -14,6 +14,7 @@ const DATA_STORES = ['dives', 'certs', 'hotlines', 'contacts', 'kv', 'buddies'];
 const BACKUP_FORMAT = 'tauch-logbuch-backup';
 const SHARE_RE = /TLB([01]):([A-Za-z0-9_-]+)/;   // Buddy-Code: TLB1 = komprimiert, TLB0 = unkomprimiert
 const MAX_MESSAGE = 60000;                         // WhatsApp kürzt Nachrichten über 65.536 Zeichen
+const QR_MAX = 2900;                               // QR-Code Version 40, Fehlerkorrektur L: max. 2.953 Byte
 const PHOTO_LEVELS = [[560, 0.6], [440, 0.5], [340, 0.45], [260, 0.4], [200, 0.35]];   // [px, JPEG-Qualität]
 const DEFAULT_SETTINGS = { depth: 'm', pressure: 'bar', temp: 'C', weight: 'kg' };
 
@@ -87,7 +88,58 @@ const ICON = {
   copy: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>'),
   calendar: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
   paste: svg('<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 11h6M9 15h4"/>'),
+  qr: svg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>'),
 };
+
+/* ---------- Flaschen (ab 1.2 mehrere pro Tauchgang) ---------- */
+// Ältere Einträge haben nur eine Flasche in Einzelfeldern → als Liste lesen
+function getTanks(d) {
+  if (Array.isArray(d.tanks)) return d.tanks;
+  if (d.tankSize != null || d.pStart != null || d.pEnd != null || d.gas === 'nitrox') {
+    return [{ size: d.tankSize ?? null, gas: d.gas || 'luft', o2: d.o2 ?? null, pStart: d.pStart ?? null, pEnd: d.pEnd ?? null }];
+  }
+  return [];
+}
+const gasLabel = t => (t.gas === 'nitrox' ? `Nitrox${t.o2 != null ? ` ${fmt(t.o2, 0)} %` : ''}` : 'Luft');
+const modDepth = (o2, ppo2) => (ppo2 / (o2 / 100) - 1) * 10;   // maximale Tiefe in m für O₂-Anteil
+const dv = (kind, v) => (v == null ? null : Number(unit(kind).f(v).toFixed(unit(kind).d)));   // metrisch → Anzeige, gerundet
+
+// Schieberegler + Zahlenfeld, beide synchron. Leeres Zahlenfeld = keine Angabe.
+function rangeField({ label, name = '', value, min, max, step, unit: u, dec = 0, def, attrs = '' }) {
+  const has = value != null && value !== '';
+  return `<div class="field range-field">
+    <div class="range-head">
+      <span class="field-label">${esc(label)}</span>
+      <span class="field-input has-unit range-num"><input type="text" inputmode="decimal"${name ? ` name="${name}"` : ''} value="${has ? fmtPlain(value, dec) : ''}" data-dec="${dec}" autocomplete="off" aria-label="${esc(label)}" ${attrs}><span class="unit">${esc(u)}</span></span>
+    </div>
+    <input type="range" min="${min}" max="${max}" step="${step}" value="${has ? value : def}"${has ? '' : ' class="unset"'} aria-label="${esc(label)} (Regler)" ${attrs}>
+  </div>`;
+}
+function syncRange(el) {
+  const box = el.closest('.range-field');
+  if (!box) return;
+  const range = $('input[type=range]', box);
+  const text = $('input[type=text]', box);
+  if (el === range) {
+    text.value = fmtPlain(Number(range.value), Number(text.dataset.dec));
+    range.classList.remove('unset');
+  } else {
+    const v = parseNum(text.value);
+    if (v == null) range.classList.add('unset');
+    else if (!Number.isNaN(v)) { range.value = v; range.classList.remove('unset'); }
+  }
+}
+
+const scriptLoads = {};
+function loadScript(src) {
+  return (scriptLoads[src] ||= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => { delete scriptLoads[src]; reject(new Error(`${src} konnte nicht geladen werden`)); };
+    document.head.appendChild(s);
+  }));
+}
 
 /* =========================================================
    Datenbank
@@ -363,6 +415,7 @@ const ROUTES = [
   ['buddys', () => pageBuddys()],
   ['buddys/teilen', () => pageMyCard()],
   ['buddys/einfuegen', () => pageImportPaste()],
+  ['buddys/scannen', () => pageScan()],
   [`buddys/${ID}`, id => pageBuddyDetail(id)],
   ['import=(.+)', raw => pageImportLink(raw)],
   ['brevets', pageBrevets],
@@ -404,6 +457,7 @@ async function router() {
 
   closeModal();
   hideLightbox();
+  stopCamera();
   const tab = path.split('/')[0];
   document.body.dataset.tab = tab;
   $$('.tabbar a').forEach(a => {
@@ -509,11 +563,16 @@ async function pageDiveForm(id, opts = {}) {
   if (!d.planned && d.nr == null) {
     // Nummer hochzählen, Ausrüstung vom letzten Tauchgang vorschlagen → weniger tippen
     d.nr = nextNr;
-    d.tankSize ??= lastWith('tankSize');
     d.suit ??= lastWith('suit');
     d.weight ??= lastWith('weight');
   }
   const photos = (d.photos || []).map(pid => ({ id: pid }));
+  // Flaschen: vorhandene übernehmen, sonst Größen/Gase vom letzten Tauchgang vorschlagen
+  let tanks = getTanks(d).map(t => ({ ...t }));
+  if (!tanks.length) {
+    const lastTanks = sortDives(logged).map(getTanks).find(a => a.length) || [{ size: null, gas: 'luft', o2: null }];
+    tanks = lastTanks.map(t => ({ size: t.size ?? null, gas: t.gas || 'luft', o2: t.o2 ?? null, pStart: null, pEnd: null }));
+  }
 
   return {
     title: opts.complete ? 'Tauchgang nachtragen'
@@ -535,24 +594,19 @@ async function pageDiveForm(id, opts = {}) {
         ${field({ label: 'Land / Ort', name: 'location', value: d.location, list: 'dl-location', placeholder: 'z. B. Hemmoor, Deutschland' })}
         ${field({ label: 'Buddy', name: 'buddy', value: d.buddy, list: 'dl-buddy' })}
       </fieldset>
-      <fieldset class="form-card" data-only-done><legend>Tauchgang</legend>
-        <div class="grid2">
-          ${numField('Max. Tiefe', 'maxDepth', 'depth', d.maxDepth)}
-          ${field({ label: 'Tauchzeit', name: 'duration', value: d.duration ?? '', mode: 'numeric', unit: 'min' })}
+      <fieldset class="form-card"><legend>Tiefe &amp; Zeit</legend>
+        ${rangeField({ label: 'Max. Tiefe', name: 'maxDepth', value: dv('depth', d.maxDepth), min: 0, max: settings.depth === 'ft' ? 200 : 60,
+          step: settings.depth === 'ft' ? 1 : 0.5, unit: unit('depth').label, dec: unit('depth').d, def: settings.depth === 'ft' ? 60 : 18 })}
+        ${rangeField({ label: 'Tauchzeit', name: 'duration', value: d.duration, min: 0, max: 120, step: 1, unit: 'min', dec: 0, def: 45 })}
+        <div class="grid2" data-only-done>
           ${numField('Wassertemp.', 'waterTemp', 'temp', d.waterTemp)}
           ${numField('Sicht', 'visibility', 'depth', d.visibility)}
         </div>
       </fieldset>
-      <fieldset class="form-card" data-only-done><legend>Flasche &amp; Gas</legend>
-        ${field({ label: 'Flaschengröße', name: 'tankSize', value: d.tankSize != null ? fmtPlain(d.tankSize) : '', mode: 'decimal', unit: 'l' })}
-        <div class="field"><span class="field-label">Gas</span>${segmented('gas', [['luft', 'Luft'], ['nitrox', 'Nitrox']], d.gas || 'luft')}</div>
-        <div id="o2-field"${d.gas === 'nitrox' ? '' : ' hidden'}>
-          ${field({ label: 'O₂-Anteil', name: 'o2', value: d.o2 != null ? fmtPlain(d.o2) : '', mode: 'decimal', unit: '%', placeholder: '32' })}
-        </div>
-        <div class="grid2">
-          ${numField('Druck Anfang', 'pStart', 'pressure', d.pStart)}
-          ${numField('Druck Ende', 'pEnd', 'pressure', d.pEnd)}
-        </div>
+      <fieldset class="form-card"><legend>Flaschen &amp; Gas</legend>
+        <div id="tank-edit"></div>
+        <button type="button" class="btn btn-block" data-tank-add style="margin-top:12px">${ICON.plus}Flasche hinzufügen</button>
+        <p class="hint" data-gas-total></p>
       </fieldset>
       <fieldset class="form-card" data-only-done><legend>Ausrüstung</legend>
         <div class="field"><span class="field-label">Anzug</span>
@@ -574,12 +628,56 @@ async function pageDiveForm(id, opts = {}) {
     after(view) {
       const form = $('#dive-form', view);
       const grid = $('#photo-edit', view);
+      const tankBox = $('#tank-edit', form);
+      const P = settings.pressure === 'psi' ? { max: 4500, step: 50, def: 3000 } : { max: 300, step: 5, def: 200 };
+      const plannedNow = () => form.elements.status.value === 'planned';
+      const modText = o2 => (o2 >= 21 ? `MOD ${dispU('depth', modDepth(o2, 1.4))} bei ppO₂ 1,4 · ${dispU('depth', modDepth(o2, 1.6))} bei 1,6` : '');
+      const gasTotal = () => {
+        let have = 0;
+        let used = 0;
+        for (const t of tanks) {
+          if (t.size && t.pStart != null) have += t.size * t.pStart;
+          if (!plannedNow() && t.size && t.pStart != null && t.pEnd != null) used += t.size * (t.pStart - t.pEnd);
+        }
+        $('[data-gas-total]', form).textContent = have ? `Gasvorrat ca. ${fmt(have, 0)} l${used ? ` · verbraucht ca. ${fmt(used, 0)} l` : ''}` : '';
+      };
+      const drawTanks = () => {
+        const isPlanned = plannedNow();
+        tankBox.innerHTML = tanks.map((t, i) => `<div class="tank-card">
+          <div class="tank-head"><strong>Flasche ${i + 1}</strong>${tanks.length > 1
+            ? `<button type="button" class="icon-btn" data-tank-remove="${i}" aria-label="Flasche ${i + 1} entfernen">${ICON.trash}</button>` : ''}</div>
+          ${rangeField({ label: 'Größe', value: t.size, min: 1, max: 30, step: 0.5, unit: 'l', dec: 1, def: 12, attrs: `data-i="${i}" data-key="size"` })}
+          <div class="field"><span class="field-label">Gas</span>${segmented(`t${i}_gas`, [['luft', 'Luft'], ['nitrox', 'Nitrox']], t.gas || 'luft')}</div>
+          ${t.gas === 'nitrox' ? `${rangeField({ label: 'O₂-Anteil', value: t.o2, min: 22, max: 100, step: 1, unit: '%', dec: 0, def: 32, attrs: `data-i="${i}" data-key="o2"` })}
+            <p class="hint mod-hint" data-mod="${i}">${modText(t.o2 ?? 32)}</p>` : ''}
+          ${rangeField({ label: isPlanned ? 'Fülldruck' : 'Druck Anfang', value: dv('pressure', t.pStart), min: 0, max: P.max, step: P.step,
+            unit: unit('pressure').label, dec: 0, def: P.def, attrs: `data-i="${i}" data-key="pStart"` })}
+          ${isPlanned ? '' : rangeField({ label: 'Druck Ende', value: dv('pressure', t.pEnd), min: 0, max: P.max, step: P.step,
+            unit: unit('pressure').label, dec: 0, def: P.def / 4, attrs: `data-i="${i}" data-key="pEnd"` })}
+        </div>`).join('');
+        gasTotal();
+      };
       const applyStatus = () => {
-        const isPlanned = form.elements.status.value === 'planned';
+        const isPlanned = plannedNow();
         $$('[data-only-done]', form).forEach(el => { el.hidden = isPlanned; });
         if (!isPlanned && !form.elements.nr.value) form.elements.nr.value = nextNr;
+        drawTanks();
       };
       applyStatus();
+
+      form.addEventListener('input', e => {
+        const el = e.target;
+        if (!el.closest('.range-field')) return;
+        syncRange(el);
+        const key = el.dataset.key;
+        if (!key) return;
+        const i = Number(el.dataset.i);
+        const v = parseNum($('input[type=text]', el.closest('.range-field')).value);
+        if (v == null) tanks[i][key] = null;
+        else if (!Number.isNaN(v)) tanks[i][key] = key.startsWith('p') ? toMetric('pressure', v) : v;
+        if (key === 'o2') { const h = $(`[data-mod="${i}"]`, form); if (h) h.textContent = modText(tanks[i].o2 ?? 0); }
+        gasTotal();
+      });
       const drawPhotos = () => {
         grid.innerHTML = photos.map((p, i) => `<div class="photo-thumb"><img alt="Foto ${i + 1}" data-zoom>
           <button type="button" class="photo-remove" data-remove="${i}" aria-label="Foto entfernen">×</button></div>`).join('');
@@ -588,7 +686,13 @@ async function pageDiveForm(id, opts = {}) {
       drawPhotos();
 
       form.addEventListener('change', async e => {
-        if (e.target.name === 'gas') $('#o2-field', form).hidden = form.elements.gas.value !== 'nitrox';
+        const gasSel = e.target.name?.match(/^t(\d+)_gas$/);
+        if (gasSel) {
+          const t = tanks[Number(gasSel[1])];
+          t.gas = e.target.value;
+          if (t.gas === 'nitrox' && t.o2 == null) t.o2 = 32;
+          drawTanks();
+        }
         if (e.target.name === 'status') applyStatus();
         if (e.target.dataset.photoInput) { photos.push(...await readPhotoInput(e.target)); drawPhotos(); }
       });
@@ -599,14 +703,37 @@ async function pageDiveForm(id, opts = {}) {
           drawPhotos();
         }
         if (e.target.closest('[data-cancel]')) goBack(id ? `logbuch/${id}` : 'logbuch');
+        if (e.target.closest('[data-tank-add]')) {
+          tanks.push({ size: null, gas: 'luft', o2: null, pStart: null, pEnd: null });
+          drawTanks();
+        }
+        const tankRm = e.target.closest('[data-tank-remove]');
+        if (tankRm && await confirmDialog({ title: `Flasche ${Number(tankRm.dataset.tankRemove) + 1} entfernen?`, ok: 'Entfernen', danger: true })) {
+          tanks.splice(Number(tankRm.dataset.tankRemove), 1);
+          drawTanks();
+        }
       });
       form.addEventListener('submit', async e => {
         e.preventDefault();
         clearErrors(form);
         const { text, num, errors } = formReader(form, d);
-        const gas = text('gas') || 'luft';
         const isPlanned = text('status') === 'planned';
         const buddyText = text('buddy');
+        const badTank = $$('input[type=text]', tankBox).find(x => x.value.trim() && Number.isNaN(parseNum(x.value)));
+        if (badTank) {
+          badTank.closest('.field').classList.add('invalid');
+          badTank.focus();
+          toast('Bitte bei der Flasche eine Zahl eingeben', 3500, true);
+          return;
+        }
+        const cleanTanks = tanks
+          .filter(t => t.size != null || t.pStart != null || t.pEnd != null || t.gas === 'nitrox')
+          .map(t => ({
+            size: t.size ?? null, gas: t.gas || 'luft',
+            o2: t.gas === 'nitrox' ? Math.min(100, Math.max(21, t.o2 ?? 32)) : null,
+            pStart: t.pStart ?? null, pEnd: isPlanned ? null : t.pEnd ?? null,
+          }));
+        const t0 = cleanTanks[0] || {};
         const rec = {
           ...d,
           id: d.id || uid(),
@@ -620,11 +747,13 @@ async function pageDiveForm(id, opts = {}) {
           duration: num('duration'),
           waterTemp: num('waterTemp', 'temp'),
           visibility: num('visibility', 'depth'),
-          tankSize: num('tankSize'),
-          gas,
-          o2: gas === 'nitrox' ? num('o2') : null,
-          pStart: num('pStart', 'pressure'),
-          pEnd: num('pEnd', 'pressure'),
+          tanks: cleanTanks,
+          // erste Flasche zusätzlich in den alten Einzelfeldern (für ältere Versionen/Backups)
+          tankSize: t0.size ?? null,
+          gas: t0.gas || 'luft',
+          o2: t0.o2 ?? null,
+          pStart: t0.pStart ?? null,
+          pEnd: t0.pEnd ?? null,
           suit: text('suit') || null,
           weight: num('weight', 'weight'),
           buddy: buddyText,
@@ -638,7 +767,6 @@ async function pageDiveForm(id, opts = {}) {
         };
         if (!rec.date) errors.unshift(['date', 'Bitte ein Datum wählen']);
         if (!rec.site) errors.unshift(['site', 'Bitte den Tauchplatz eintragen']);
-        if (rec.o2 != null && (rec.o2 < 21 || rec.o2 > 100)) errors.push(['o2', 'O₂-Anteil zwischen 21 und 100 %']);
         if (errors.length) { showErrors(form, errors); return; }
         try {
           await saveWithPhotos('dives', rec, photos, rec.photos, d.photos || []);
@@ -657,15 +785,16 @@ async function pageDiveDetail(id) {
   const d = await dbGet('dives', id);
   if (!d) return notFound('logbuch');
 
-  const gas = d.gas === 'nitrox' ? `Nitrox${d.o2 != null ? ` ${fmt(d.o2)} % O₂` : ''}` : 'Luft';
-  const used = d.pStart != null && d.pEnd != null ? d.pStart - d.pEnd : null;
-  let usage = '';
-  if (used != null) {
-    usage = dispU('pressure', used);
-    if (d.tankSize) usage += ` · ca. ${fmt(used * d.tankSize, 0)} l`;
-  }
-  const pressure = d.pStart != null || d.pEnd != null
-    ? `${d.pStart != null ? fmt(unit('pressure').f(d.pStart), 0) : '?'} → ${dispU('pressure', d.pEnd)}` : '';
+  const tanks = getTanks(d);
+  const tankRows = tanks.map((t, i) => {
+    const parts = [t.size != null ? `${fmt(t.size)} l` : '', gasLabel(t)];
+    if (d.planned) { if (t.pStart != null) parts.push(dispU('pressure', t.pStart)); }
+    else if (t.pStart != null || t.pEnd != null) {
+      parts.push(`${t.pStart != null ? fmt(unit('pressure').f(t.pStart), 0) : '?'} → ${dispU('pressure', t.pEnd)}`);
+    }
+    if (!d.planned && t.size && t.pStart != null && t.pEnd != null) parts.push(`ca. ${fmt((t.pStart - t.pEnd) * t.size, 0)} l`);
+    return [tanks.length > 1 ? `Flasche ${i + 1}` : 'Flasche', parts.filter(Boolean).join(' · ')];
+  });
   const tile = (label, v) => `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
 
   return {
@@ -680,10 +809,11 @@ async function pageDiveDetail(id) {
         ${tile('Sicht', dispU('depth', d.visibility))}
       </div>`}
       <div class="card">${kvList([
-        ['Flasche', d.tankSize != null ? `${fmt(d.tankSize)} l` : ''],
-        ['Gas', gas],
-        ['Druck', pressure],
-        ['Verbrauch', usage],
+        ...(d.planned ? [
+          ['Geplante Tiefe', d.maxDepth != null ? dispU('depth', d.maxDepth) : ''],
+          ['Geplante Dauer', d.duration != null ? `${fmt(d.duration, 0)} min` : ''],
+        ] : []),
+        ...tankRows,
         ['Anzug', SUITS[d.suit] || ''],
         ['Blei', d.weight != null ? dispU('weight', d.weight) : ''],
         ['Buddy', d.buddy],
@@ -1308,7 +1438,8 @@ async function seedDemo() {
     dive(5, '2026-08-10', '08:45', 'SS Thistlegorm', 'Rotes Meer, Ägypten', 30.1, 46, 26, 20, { tankSize: 15, gas: 'nitrox', o2: 28, suit: 'nass', weight: 4, pStart: 210, pEnd: 70, buddy: 'Guide Ahmed' }),
     dive(6, '2026-09-26', '13:20', 'Zeelandbrug – Oosterschelde', 'Zierikzee, Niederlande', 14.2, 61, 16, 3, { notes: 'Bei Stillwasser. Sepien und Seenelken.' }),
     dive(null, '2026-11-07', '10:00', 'Kreidesee Hemmoor', 'Hemmoor, Deutschland', null, null, null, null,
-      { planned: true, pStart: null, pEnd: null, buddyIds: ['demo-buddy-jonas'], notes: 'Treffpunkt 9:30 an der Basis.' }),
+      { planned: true, maxDepth: 30, duration: 45, pStart: null, pEnd: null, buddyIds: ['demo-buddy-jonas'], notes: 'Treffpunkt 9:30 an der Basis.',
+        tanks: [{ size: 12, gas: 'nitrox', o2: 32, pStart: 200, pEnd: null }, { size: 7, gas: 'nitrox', o2: 50, pStart: 200, pEnd: null }] }),
   ];
   const buddies = [{
     id: 'demo-buddy-jonas', name: 'Jonas',
@@ -1386,19 +1517,32 @@ async function encodeShare(obj) {
   if (typeof CompressionStream === 'function') return 'TLB1:' + b64url(await pipeBytes(json, new CompressionStream('deflate-raw')));
   return 'TLB0:' + b64url(json);
 }
-async function decodeShare(text) {
-  const m = String(text || '').replace(/%3A/gi, ':').replace(/\s+/g, '').match(SHARE_RE);
-  if (!m) throw new Error('Kein Tauch-Logbuch-Code gefunden.');
-  let obj;
-  try {
-    let bytes = fromB64url(m[2]);
-    if (m[1] === '1') bytes = await pipeBytes(bytes, new DecompressionStream('deflate-raw'));
-    obj = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    throw new Error('Der Code ist unvollständig oder beschädigt. Bitte die ganze Nachricht kopieren.');
-  }
-  if (obj?.app !== 'tlb' || !['buddy', 'dive'].includes(obj.t)) throw new Error('Unbekannter Code.');
+async function unpackShare(kind, data) {
+  let bytes = fromB64url(data);
+  if (kind === '1') bytes = await pipeBytes(bytes, new DecompressionStream('deflate-raw'));
+  const obj = JSON.parse(new TextDecoder().decode(bytes));
+  if (obj?.app !== 'tlb' || !['buddy', 'dive'].includes(obj.t)) throw new Error('kein Tauch-Logbuch-Code');
   return obj;
+}
+async function decodeShare(text) {
+  // Zeilenumbrüche und (auch doppelt) URL-kodierte Doppelpunkte entfernen, z. B. aus Safari-Adressen
+  const clean = String(text || '').replace(/\s+/g, '').replace(/%25/gi, '%').replace(/%3A/gi, ':');
+  const m = clean.match(SHARE_RE);
+  if (m) {
+    try { return await unpackShare(m[1], m[2]); }
+    catch { throw new Error('Der Code ist unvollständig oder beschädigt. Bitte die ganze Nachricht kopieren – bei langen Nachrichten teilt WhatsApp sie manchmal in zwei Teile.'); }
+  }
+  // Kennung "TLB1:" fehlt – den längsten Code-Block trotzdem versuchen
+  const runs = (clean.match(/[A-Za-z0-9_-]{40,}/g) || []).sort((a, b) => b.length - a.length);
+  for (const run of runs.slice(0, 3)) {
+    for (const kind of ['1', '0']) {
+      try { return await unpackShare(kind, run); } catch { /* nächste Variante */ }
+    }
+  }
+  if (runs.length) {
+    throw new Error('Hier fehlt der Anfang des Codes (er beginnt mit „TLB1:“). WhatsApp hat die Nachricht wohl in zwei Teile geteilt – bitte die erste Nachricht kopieren oder ohne Fotos neu senden.');
+  }
+  throw new Error('Kein Tauch-Logbuch-Code gefunden.');
 }
 const shareLink = code => `${location.origin}${location.pathname}#import=${code}`;
 
@@ -1430,28 +1574,51 @@ const shareBox = () => `<div class="card">
     <p class="meta-line" data-code-info>Code wird erstellt …</p>
     <div class="stack">
       <button type="button" class="btn btn-primary btn-big btn-block" data-share disabled>${ICON.share}Teilen</button>
+      <button type="button" class="btn btn-block" data-qr disabled>${ICON.qr}QR-Code zeigen</button>
       <button type="button" class="btn btn-block" data-copy disabled>${ICON.copy}Nachricht kopieren</button>
     </div>
-    <p class="hint">„Teilen“ öffnet z. B. WhatsApp oder Nachrichten. Dein Buddy kopiert die Nachricht und fügt sie in seiner App unter Buddys → „Code einfügen“ ein.</p>
+    <p class="hint">Am Tauchplatz am einfachsten: <strong>QR-Code zeigen</strong>, dein Buddy scannt ihn in seiner App unter Buddys → „QR-Code scannen“. Kein Telefonnummern-Tausch nötig.</p>
   </div>`;
+
+async function showQR(text) {
+  await loadScript('lib/qrcode.js');
+  let qr = null;
+  for (const level of ['M', 'L']) {
+    try { qr = qrcode(0, level); qr.addData(text, 'Byte'); qr.make(); break; } catch { qr = null; }
+  }
+  if (!qr) { toast('Zu viele Daten für einen QR-Code', 4000, true); return; }
+  const src = qr.createDataURL(Math.max(2, Math.floor(640 / qr.getModuleCount())), 4);
+  await modal({
+    title: 'QR-Code für deinen Buddy',
+    html: `<div class="qr-box"><img src="${src}" alt="QR-Code"></div>
+      <p>Dein Buddy öffnet in seiner App <strong>Buddys → QR-Code scannen</strong>. Tipp: Bildschirm hell stellen.</p>`,
+    buttons: [{ label: 'Fertig', value: true, cls: 'btn-primary' }],
+  });
+}
 function bindShareBox(view, form, build, title) {
   const info = $('[data-code-info]', view);
   const bShare = $('[data-share]', view);
   const bCopy = $('[data-copy]', view);
+  const bQr = $('[data-qr]', view);
   let message = '';
+  let qrText = '';
   let seq = 0;
   let timer;
   const rebuild = async () => {
     const mine = ++seq;
     message = '';
-    bShare.disabled = bCopy.disabled = true;
+    bShare.disabled = bCopy.disabled = bQr.disabled = true;
     info.textContent = 'Code wird erstellt …';
     try {
       const r = await build(new FormData(form));
       if (mine !== seq) return;
       message = typeof r === 'string' ? r : r.message;
-      info.textContent = `Fertig – Nachricht mit ${fmt(message.length / 1024)} KB Text.${r.note ? ' ' + r.note : ''}`;
+      // Für den QR-Code nur der Link (ohne Fotos) – passt so in einen Code und öffnet notfalls auch über die normale Kamera
+      qrText = r.qr || message.match(/https?:\/\/\S+/)?.[0] || '';
+      const qrNote = qrText.length > QR_MAX ? ' Für einen QR-Code ist es zu viel – bitte über „Teilen“ schicken.' : '';
+      info.textContent = `Fertig – Nachricht mit ${fmt(message.length / 1024)} KB Text.${r.note ? ' ' + r.note : ''}${qrNote}`;
       bShare.disabled = bCopy.disabled = false;
+      bQr.disabled = !qrText || qrText.length > QR_MAX;
     } catch (e) {
       if (mine === seq) info.textContent = e.message;
     }
@@ -1461,6 +1628,7 @@ function bindShareBox(view, form, build, title) {
   form.addEventListener('submit', e => e.preventDefault());
   bShare.addEventListener('click', () => shareText(message, title));
   bCopy.addEventListener('click', () => copyText(message));
+  bQr.addEventListener('click', () => showQR(qrText).catch(e => toast(e.message, 4000, true)));
   rebuild();
 }
 async function myName(fd) {
@@ -1494,7 +1662,8 @@ async function pageBuddys() {
     title: 'Buddys',
     html: `<div class="stack">
         <a class="btn btn-primary btn-big btn-block" href="#buddys/teilen">${ICON.share}Meine Buddy-Karte teilen</a>
-        <a class="btn btn-block" href="#buddys/einfuegen">${ICON.paste}Code von Buddy einfügen</a>
+        <a class="btn btn-primary btn-big btn-block" href="#buddys/scannen">${ICON.qr}QR-Code scannen</a>
+        <a class="btn btn-block" href="#buddys/einfuegen">${ICON.paste}Code aus Nachricht einfügen</a>
       </div>
       ${buddies.length ? `<ul class="list">${buddies.map(buddyItem).join('')}</ul>`
         : `<div class="empty"><strong>Noch keine Buddys</strong>Schick deinem Tauchpartner deine Buddy-Karte und lass dir seine schicken.</div>`}
@@ -1605,20 +1774,22 @@ async function pageMyCard() {
         await setKV('sharePrefs', p);
         const me = await myName(fd);
         const make = async (photos, level) => {
-          const code = await encodeShare(await buildMyCard(me, { ...p, photos }, level));
-          return `🤿 Buddy-Karte von ${me.name} für das Tauch-Logbuch.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${shareLink(code)}`;
+          const link = shareLink(await encodeShare(await buildMyCard(me, { ...p, photos }, level)));
+          return { link, message: `🤿 Buddy-Karte von ${me.name} für das Tauch-Logbuch.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${link}` };
         };
+        const plain = await make(false);   // ohne Fotos – immer für den QR-Code
         // Fotos schrittweise verkleinern, bis die Nachricht vollständig in WhatsApp passt
         if (p.photos && p.certs) {
           for (const level of PHOTO_LEVELS) {
-            const message = await make(true, level);
-            if (message.length <= MAX_MESSAGE) {
-              return { message, note: level === PHOTO_LEVELS[0] ? '' : 'Fotos wurden stärker verkleinert, damit alles in eine Nachricht passt.' };
+            const r = await make(true, level);
+            if (r.message.length <= MAX_MESSAGE) {
+              const note = level === PHOTO_LEVELS[0] ? '' : 'Fotos wurden stärker verkleinert, damit alles in eine Nachricht passt.';
+              return { message: r.message, qr: plain.link, note: `${note} Im QR-Code sind keine Fotos.`.trim() };
             }
           }
-          return { message: await make(false), note: 'Die Fotos sind zu groß für eine Nachricht und wurden weggelassen.' };
+          return { message: plain.message, qr: plain.link, note: 'Die Fotos sind zu groß für eine Nachricht und wurden weggelassen.' };
         }
-        return make(false);
+        return { message: plain.message, qr: plain.link };
       }, 'Buddy-Karte');
     },
   };
@@ -1637,15 +1808,17 @@ async function pageDiveShare(id) {
           <p class="meta-line">${fmtDate(d.date)}${d.time ? `, ${esc(d.time)} Uhr` : ''}${d.location ? ` · ${esc(d.location)}` : ''}</p>
           ${field({ label: 'Dein Name', name: 'name', value: await defaultName(), required: true })}
           ${d.notes ? check('notes', 'Notizen mitschicken', d.notes.slice(0, 80) + (d.notes.length > 80 ? ' …' : ''), d.planned) : ''}
-          <p class="hint">Geteilt werden Datum, Uhrzeit, Tauchplatz und Ort${d.planned ? '' : ', Tiefe, Tauchzeit, Wassertemperatur und Sicht'}. Dein Buddy übernimmt den Tauchgang mit einem Tipp in sein Logbuch.</p>
+          <p class="hint">Geteilt werden Datum, Uhrzeit, Tauchplatz, Ort, Tiefe und Dauer${d.planned ? ' sowie die geplanten Flaschen' : ', Wassertemperatur und Sicht'}. Dein Buddy übernimmt den Tauchgang mit einem Tipp in sein Logbuch.</p>
         </fieldset>
       </form>
       ${shareBox()}`,
     after(view) {
       bindShareBox(view, $('#dive-share-form', view), async fd => {
         const me = await myName(fd);
-        const dive = { sid: d.shareId || d.id, planned: !!d.planned, date: d.date, time: d.time, site: d.site, location: d.location };
-        if (!d.planned) Object.assign(dive, { maxDepth: d.maxDepth, duration: d.duration, waterTemp: d.waterTemp, visibility: d.visibility });
+        const dive = { sid: d.shareId || d.id, planned: !!d.planned, date: d.date, time: d.time, site: d.site, location: d.location,
+          maxDepth: d.maxDepth, duration: d.duration };
+        if (d.planned) dive.tanks = getTanks(d).map(t => ({ size: t.size, gas: t.gas, o2: t.o2, pStart: t.pStart }));
+        else Object.assign(dive, { waterTemp: d.waterTemp, visibility: d.visibility });
         if (fd.has('notes') && d.notes) dive.notes = d.notes;
         const code = await encodeShare({ t: 'dive', from: { id: me.id, name: me.name }, dive, at: new Date().toISOString() });
         return `🤿 ${d.planned ? 'Geplanter Tauchgang' : 'Tauchgang'}: ${d.site}, ${fmtDate(d.date)}${d.time ? ` um ${d.time} Uhr` : ''} – von ${me.name}.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${shareLink(code)}`;
@@ -1670,6 +1843,8 @@ async function importPreview(obj) {
   return `<div class="card"><div class="cert-org">${d.planned ? 'Geplanter Tauchgang' : 'Tauchgang'} von ${esc(obj.from?.name)}</div>
     <div class="cert-level">${esc(d.site)}</div>
     <p class="meta-line">${fmtDate(cleanStr(d.date, 10))}${d.time ? `, ${esc(d.time)} Uhr` : ''}${d.location ? ` · ${esc(d.location)}` : ''}</p>
+    ${Array.isArray(d.tanks) && d.tanks.length ? `<p class="meta-line">Flaschen: ${d.tanks.slice(0, 8).map(t =>
+      esc([cleanNum(t.size) != null ? `${fmt(cleanNum(t.size))} l` : '', gasLabel({ gas: t.gas, o2: cleanNum(t.o2) })].filter(Boolean).join(' '))).join(' · ')}</p>` : ''}
     ${d.notes ? `<p class="notes" style="margin-bottom:12px">${esc(cleanStr(d.notes, 2000))}</p>` : ''}
     <button type="button" class="btn btn-primary btn-big btn-block" data-apply>${existing ? 'Tauchgang aktualisieren' : 'In mein Logbuch übernehmen'}</button></div>`;
 }
@@ -1738,6 +1913,13 @@ async function applyShare(obj) {
       gas: 'luft', photos: [], notes: cleanStr(src.notes, 2000), buddy: fromName, buddyIds: [],
       created: Date.now(), updated: Date.now(),
     };
+    // Geplante Flaschen übernehmen (lassen sich danach anpassen)
+    if (planned && Array.isArray(src.tanks)) {
+      rec.tanks = src.tanks.slice(0, 8).map(t => ({
+        size: cleanNum(t.size), gas: t.gas === 'nitrox' ? 'nitrox' : 'luft',
+        o2: t.gas === 'nitrox' ? cleanNum(t.o2) : null, pStart: cleanNum(t.pStart), pEnd: null,
+      }));
+    }
   }
   if (fromId && !rec.buddyIds?.includes(fromId)) {
     rec.buddyIds = [...(rec.buddyIds || []), fromId];
@@ -1787,6 +1969,74 @@ async function pageImportPaste() {
           toast('Bitte lange ins Feld tippen und „Einsetzen“ wählen', 4000);
         }
       });
+    },
+  };
+}
+
+/* ---------- QR-Code scannen (Kamera + jsQR, funktioniert offline) ---------- */
+let camStream = null;
+function stopCamera() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+}
+
+async function pageScan() {
+  return {
+    title: 'QR-Code scannen',
+    back: 'buddys',
+    html: `<div class="scan-box"><video playsinline muted></video><div class="scan-frame"></div></div>
+      <p class="meta-line" data-scan-info style="margin-top:12px">Kamera wird gestartet …</p>
+      <div id="import-preview"></div>`,
+    async after(view) {
+      const video = $('video', view);
+      const info = $('[data-scan-info]', view);
+      const out = $('#import-preview', view);
+      try {
+        await loadScript('lib/jsQR.js');
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Dieser Browser erlaubt keinen Kamerazugriff.');
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        if (!view.isConnected) { stream.getTracks().forEach(t => t.stop()); return; }   // inzwischen weiternavigiert
+        stopCamera();
+        camStream = stream;
+      } catch (e) {
+        info.textContent = e.name === 'NotAllowedError'
+          ? 'Kein Zugriff auf die Kamera. Bitte erlauben (iPhone: Einstellungen → Apps → Safari → Kamera) und erneut versuchen.'
+          : `Kamera nicht verfügbar: ${e.message}`;
+        return;
+      }
+      video.srcObject = camStream;
+      await video.play().catch(() => {});
+      info.textContent = 'Halte die Kamera auf den QR-Code deines Buddys.';
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      let busy = false;
+      const tick = async () => {
+        if (!camStream || !view.isConnected) return;
+        if (!busy && video.readyState >= 2 && video.videoWidth) {
+          const scale = Math.min(1, 800 / Math.max(video.videoWidth, video.videoHeight));
+          canvas.width = Math.round(video.videoWidth * scale);
+          canvas.height = Math.round(video.videoHeight * scale);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const hit = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, { inversionAttempts: 'dontInvert' });
+          if (hit?.data) {
+            busy = true;
+            try {
+              const obj = await decodeShare(hit.data);
+              stopCamera();
+              navigator.vibrate?.(80);
+              $('.scan-box', view).hidden = true;
+              info.textContent = 'QR-Code erkannt:';
+              out.innerHTML = await importPreview(obj);
+              bindImport(out, obj);
+              return;
+            } catch (e) {
+              info.textContent = `${e.message} – weiter scannen …`;
+            }
+            busy = false;
+          }
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
     },
   };
 }

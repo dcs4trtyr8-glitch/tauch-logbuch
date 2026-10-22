@@ -10,6 +10,7 @@ Persönliches Tauch-Logbuch als Web-App (PWA). Läuft offline auf dem Handy, all
 | `manifest.json` | Name, Icons, Farben, Schnellzugriffe „Notfall“ und „Neuer Tauchgang“ |
 | `sw.js` | Service Worker für den Offline-Betrieb |
 | `icons/` | App-Icons (192 px, 512 px, SVG) |
+| `lib/` | QR-Code erzeugen (`qrcode.js`) und scannen (`jsQR.js`) |
 | `lokal-testen.ps1` | Kleiner Webserver zum Testen am PC (wird online nicht gebraucht) |
 
 ## 1. Lokal am PC testen
@@ -86,6 +87,11 @@ Austausch ganz ohne Server, per Nachricht (z. B. WhatsApp):
 - **Tauchgang → Mit Buddy teilen:** geplante oder getauchte Tauchgänge. Der Buddy übernimmt sie mit einem Tipp, und ein erneutes Teilen aktualisiert den Eintrag, statt ihn doppelt anzulegen.
 - **Empfangen:** Nachricht lange drücken → Kopieren → in der App **Buddys → Code einfügen**. Auf dem iPhone öffnet sich ein Link immer in Safari, nicht in der installierten App, deshalb geht es dort über Kopieren und Einfügen.
 - Die Daten eines Buddys sind so aktuell wie der letzte Code, den er geschickt hat.
+- **QR-Code (ab 1.2):** Beim Teilen auf „QR-Code zeigen“ tippen, und der Buddy scannt ihn unter Buddys → „QR-Code scannen“. Das geht ohne Telefonnummern-Tausch und auch offline. Brevet-Fotos passen nicht in einen QR-Code und gehen nur per Nachricht. Der Scanner nutzt `lib/jsQR.js`, der QR-Erzeuger `lib/qrcode.js` (beide MIT-Lizenz).
+
+## Flaschen (ab 1.2)
+
+Beliebig viele Flaschen pro Tauchgang (z. B. Stage oder Deko), jeweils mit Schieberegler und Zahlenfeld für Größe, O₂-Anteil und Druck. Bei Nitrox zeigt die App die MOD bei ppO₂ 1,4 und 1,6, darunter den gesamten Gasvorrat und den Verbrauch. Ältere Einträge mit einer Flasche werden automatisch übernommen.
 
 ## 6. Später etwas ändern
 

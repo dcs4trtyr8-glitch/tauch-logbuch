@@ -5,7 +5,7 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
@@ -103,6 +103,111 @@ function getTanks(d) {
 const gasLabel = t => (t.gas === 'nitrox' ? `Nitrox${t.o2 != null ? ` ${fmt(t.o2, 0)} %` : ''}` : 'Luft');
 const modDepth = (o2, ppo2) => (ppo2 / (o2 / 100) - 1) * 10;   // maximale Tiefe in m für O₂-Anteil
 const dv = (kind, v) => (v == null ? null : Number(unit(kind).f(v).toFixed(unit(kind).d)));   // metrisch → Anzeige, gerundet
+const tankO2 = t => (t.gas === 'nitrox' ? (t.o2 ?? 32) : 21);
+const ppO2 = (o2, depth) => (o2 / 100) * (depth / 10 + 1);
+const okNum = v => (v == null || Number.isNaN(v) ? null : v);
+const fmtPp = v => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/* ---------- Tauchgangsplan: Aufstieg, Gaswechsel, Gasbedarf ----------
+   Bewusst KEINE Dekompressionsberechnung – Nullzeit und Stopps gehören in den Tauchcomputer. */
+const PLAN_DEFAULTS = { sac: 20, rate: 10, stop: true, reserve: 50 };
+const DESCENT_RATE = 18;   // m/min, Annahme für den Abstieg
+const switchDepth = t => Math.floor(modDepth(tankO2(t), 1.6) / 3) * 3;   // Wechseltiefe bei ppO₂ 1,6, auf 3 m abgerundet
+
+function planDive({ depth, duration, tanks, sac, rate, stop, reserve }) {
+  if (!depth || !duration || !tanks.length) return { error: 'Für den Plan bitte Tiefe, Tauchzeit und mindestens eine Flasche angeben.' };
+  const amb = d => d / 10 + 1;
+  const stopDepth = stop && depth > 6 ? 5 : 0;
+  const stopTime = stopDepth ? 3 : 0;
+  const tDesc = depth / DESCENT_RATE;
+  const tAsc = depth / rate;
+  const tBottom = duration - tDesc - tAsc - stopTime;
+  // Flasche 1 = Grundgas; weitere Flaschen mit mehr O₂ ab ihrer Wechseltiefe (die sauerstoffreichste erlaubte)
+  const gasAt = d => {
+    let best = 0;
+    tanks.forEach((t, i) => { if (i > 0 && switchDepth(t) >= d && tankO2(t) > tankO2(tanks[best])) best = i; });
+    return best;
+  };
+  const used = tanks.map(() => 0);
+  used[0] += sac * amb(depth / 2) * tDesc;
+  if (tBottom > 0) used[0] += sac * amb(depth) * tBottom;
+  for (let d = depth; d > 0; d -= 1) {
+    const step = Math.min(1, d);
+    const mid = d - step / 2;
+    used[gasAt(mid)] += (sac * amb(mid) * step) / rate;
+  }
+  if (stopTime) used[gasAt(stopDepth)] += sac * amb(stopDepth) * stopTime;
+
+  const switches = tanks.map((t, i) => ({ i, depth: Math.min(switchDepth(t), depth) }))
+    .filter(s => s.i > 0 && used[s.i] > 0)
+    .map(s => ({ ...s, pp: ppO2(tankO2(tanks[s.i]), s.depth) }));
+  const rows = tanks.map((t, i) => {
+    const endP = t.size && t.pStart != null ? t.pStart - used[i] / t.size : null;
+    return { i, need: used[i], endP, status: endP == null ? 'unknown' : endP < 0 ? 'bad' : endP < reserve ? 'warn' : 'ok' };
+  });
+  const o2 = tankO2(tanks[0]);
+  return {
+    depth, rate, tDesc, tBottom, tAsc, stopDepth, stopTime, switches, rows,
+    total: tDesc + Math.max(tBottom, 0) + tAsc + stopTime,
+    bottomPp: ppO2(o2, depth),
+    ead: o2 > 21 ? ((depth + 10) * (1 - o2 / 100)) / 0.79 - 10 : null,
+  };
+}
+
+function profileSvg(p, tanks) {
+  const W = 320, H = 120, L = 44, R = 10, T = 10, B = 18;
+  const total = p.total || 1;
+  const x = t => (L + (t / total) * (W - L - R)).toFixed(1);
+  const y = d => (T + (d / p.depth) * (H - T - B)).toFixed(1);
+  const bottomEnd = p.tDesc + Math.max(p.tBottom, 0);
+  const pts = [[0, 0], [p.tDesc, p.depth], [bottomEnd, p.depth]];
+  let t = bottomEnd + (p.depth - p.stopDepth) / p.rate;
+  pts.push([t, p.stopDepth]);
+  if (p.stopTime) { t += p.stopTime; pts.push([t, p.stopDepth]); t += p.stopDepth / p.rate; pts.push([t, 0]); }
+  const marks = p.switches.map(s => {
+    const ts = bottomEnd + (p.depth - Math.max(s.depth, p.stopDepth)) / p.rate;
+    return `<circle cx="${x(ts)}" cy="${y(s.depth)}" r="4.5" class="plan-switch"/>
+      <text x="${x(ts)}" y="${Number(y(s.depth)) - 8}" text-anchor="middle">${esc(gasLabel(tanks[s.i]))}</text>`;
+  }).join('');
+  return `<svg class="plan-profile" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tauchprofil">
+    <line x1="${L}" y1="${y(0)}" x2="${W - R}" y2="${y(0)}" class="plan-axis"/>
+    <line x1="${L}" y1="${y(0)}" x2="${L}" y2="${y(p.depth)}" class="plan-axis"/>
+    <polyline points="${pts.map(([a, b]) => `${x(a)},${y(b)}`).join(' ')}" class="plan-line"/>
+    ${marks}
+    <text x="${L - 6}" y="${Number(y(0)) + 4}" text-anchor="end">0</text>
+    <text x="${L - 6}" y="${Number(y(p.depth)) + 4}" text-anchor="end">${esc(dispU('depth', p.depth))}</text>
+    <text x="${W - R}" y="${H - 3}" text-anchor="end">${Math.round(total)} min</text>
+  </svg>`;
+}
+
+function planHtml(p, tanks) {
+  if (p.error) return `<p class="hint" style="margin:8px 0 0">${esc(p.error)}</p>`;
+  const warn = [];
+  if (p.tBottom < 0) warn.push('Die Tauchzeit reicht nicht für Ab- und Aufstieg – bitte verlängern.');
+  if (p.bottomPp > 1.6) warn.push(`ppO₂ von Flasche 1 in ${dispU('depth', p.depth)}: ${fmtPp(p.bottomPp)} – viel zu hoch, Gefahr einer Sauerstoffvergiftung!`);
+  else if (p.bottomPp > 1.4) warn.push(`ppO₂ von Flasche 1 in ${dispU('depth', p.depth)}: ${fmtPp(p.bottomPp)} – über 1,4, für den Grundteil nicht empfohlen.`);
+  for (const r of p.rows) if (r.status === 'bad') warn.push(`Flasche ${r.i + 1} reicht nicht – Bedarf ca. ${fmt(r.need, 0)} l.`);
+  const tile = (label, v) => `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
+  const statusTxt = { ok: '✓ reicht', warn: '⚠ Reserve angegriffen', bad: '✗ reicht nicht', unknown: '' };
+  const rows = [
+    [`ppO₂ Flasche 1 in ${dispU('depth', p.depth)}`, fmtPp(p.bottomPp)],
+    ['EAD (äquivalente Lufttiefe)', p.ead != null ? dispU('depth', p.ead) : ''],
+    ...p.switches.map(s => [`Wechsel auf Flasche ${s.i + 1} (${gasLabel(tanks[s.i])})`, `ab ${dispU('depth', s.depth)} · ppO₂ ${fmtPp(s.pp)}`]),
+    ...p.rows.filter(r => r.need > 0 || tanks[r.i].pStart != null).map(r => [
+      `Flasche ${r.i + 1} (${gasLabel(tanks[r.i])})`,
+      `Bedarf ca. ${fmt(r.need, 0)} l${r.endP != null ? ` · Ende ca. ${dispU('pressure', Math.max(0, r.endP))}` : ''} ${statusTxt[r.status]}`.trim(),
+    ]),
+  ];
+  return `${warn.map(w => `<div class="notice plan-warn"><p>${esc(w)}</p></div>`).join('')}
+    <div class="stats" style="margin-top:12px">
+      ${tile('Grundzeit', `${Math.max(0, Math.round(p.tBottom))} min`)}
+      ${tile('Aufstieg', `${Math.round(p.tAsc + p.stopTime)} min`)}
+      ${tile('Gesamt', `${Math.round(p.total)} min`)}
+    </div>
+    ${profileSvg(p, tanks)}
+    ${kvList(rows)}
+    <p class="hint">Näherung: Abstieg ${DESCENT_RATE} m/min, Aufstieg ${dispU('depth', p.rate)}/min${p.stopTime ? `, Sicherheitsstopp 3 min auf ${dispU('depth', p.stopDepth)}` : ''}, Gaswechsel bei ppO₂ 1,6. <strong>Keine Dekompressionsberechnung</strong> – Nullzeit und Deko-Stopps immer mit deinem Tauchcomputer planen.</p>`;
+}
 
 // Schieberegler + Zahlenfeld, beide synchron. Leeres Zahlenfeld = keine Angabe.
 function rangeField({ label, name = '', value, min, max, step, unit: u, dec = 0, def, attrs = '' }) {
@@ -573,6 +678,7 @@ async function pageDiveForm(id, opts = {}) {
     const lastTanks = sortDives(logged).map(getTanks).find(a => a.length) || [{ size: null, gas: 'luft', o2: null }];
     tanks = lastTanks.map(t => ({ size: t.size ?? null, gas: t.gas || 'luft', o2: t.o2 ?? null, pStart: null, pEnd: null }));
   }
+  const plan0 = { ...PLAN_DEFAULTS, ...(settings.plan || {}), ...(d.plan || {}) };
 
   return {
     title: opts.complete ? 'Tauchgang nachtragen'
@@ -608,6 +714,15 @@ async function pageDiveForm(id, opts = {}) {
         <button type="button" class="btn btn-block" data-tank-add style="margin-top:12px">${ICON.plus}Flasche hinzufügen</button>
         <p class="hint" data-gas-total></p>
       </fieldset>
+      <fieldset class="form-card" data-only-planned><legend>Tauchgangsplan</legend>
+        ${rangeField({ label: 'Atemminutenvolumen (SAC)', name: 'planSac', value: plan0.sac, min: 8, max: 35, step: 1, unit: 'l/min', dec: 0, def: 20 })}
+        ${rangeField({ label: 'Aufstiegsgeschwindigkeit', name: 'planRate', value: dv('depth', plan0.rate), min: settings.depth === 'ft' ? 10 : 3,
+          max: settings.depth === 'ft' ? 60 : 18, step: 1, unit: `${unit('depth').label}/min`, dec: 0, def: settings.depth === 'ft' ? 33 : 10 })}
+        ${rangeField({ label: 'Reserve je Flasche', name: 'planReserve', value: dv('pressure', plan0.reserve), min: 0, max: settings.pressure === 'psi' ? 1500 : 100,
+          step: settings.pressure === 'psi' ? 100 : 10, unit: unit('pressure').label, dec: 0, def: settings.pressure === 'psi' ? 700 : 50 })}
+        ${check('planStop', 'Sicherheitsstopp', `3 Minuten auf ${dispU('depth', 5)}`, plan0.stop)}
+        <div data-plan-out></div>
+      </fieldset>
       <fieldset class="form-card" data-only-done><legend>Ausrüstung</legend>
         <div class="field"><span class="field-label">Anzug</span>
           ${segmented('suit', [['nass', 'Nass'], ['halbtrocken', 'Halb&shy;trocken'], ['trocken', 'Trocki']], d.suit, true)}</div>
@@ -631,7 +746,39 @@ async function pageDiveForm(id, opts = {}) {
       const tankBox = $('#tank-edit', form);
       const P = settings.pressure === 'psi' ? { max: 4500, step: 50, def: 3000 } : { max: 300, step: 5, def: 200 };
       const plannedNow = () => form.elements.status.value === 'planned';
-      const modText = o2 => (o2 >= 21 ? `MOD ${dispU('depth', modDepth(o2, 1.4))} bei ppO₂ 1,4 · ${dispU('depth', modDepth(o2, 1.6))} bei 1,6` : '');
+      const curDepth = () => { const v = okNum(parseNum(form.elements.maxDepth.value)); return v ? toMetric('depth', v) : null; };
+      const readPlan = () => {
+        const fd = new FormData(form);
+        const n = k => okNum(parseNum(fd.get(k)));
+        return {
+          sac: n('planSac') || PLAN_DEFAULTS.sac,
+          rate: n('planRate') ? toMetric('depth', n('planRate')) : PLAN_DEFAULTS.rate,
+          reserve: n('planReserve') != null ? toMetric('pressure', n('planReserve')) : PLAN_DEFAULTS.reserve,
+          stop: fd.has('planStop'),
+        };
+      };
+      // MOD für jede Flasche (auch Luft), dazu ppO₂ in der eingestellten Tiefe
+      const updateHints = () => {
+        const depth = curDepth();
+        tanks.forEach((t, i) => {
+          const h = $(`[data-mod="${i}"]`, form);
+          if (!h) return;
+          const o2 = tankO2(t);
+          const pp = depth ? ppO2(o2, depth) : 0;
+          h.textContent = `${t.gas === 'nitrox' ? '' : 'Luft 21 % · '}MOD ${dispU('depth', modDepth(o2, 1.4))} bei ppO₂ 1,4 · ${dispU('depth', modDepth(o2, 1.6))} bei 1,6`
+            + (depth ? ` · ppO₂ in ${dispU('depth', depth)}: ${fmtPp(pp)}` : '')
+            + (i > 0 && o2 > tankO2(tanks[0]) ? ` · Wechsel ab ${dispU('depth', switchDepth(t))}` : '');
+          // Grundgas (Flasche 1) warnen; Deko-Flaschen sind in der Maximaltiefe absichtlich zu sauerstoffreich
+          h.classList.toggle('pp-warn', i === 0 && pp > 1.4 && pp <= 1.6);
+          h.classList.toggle('pp-bad', i === 0 && pp > 1.6);
+        });
+      };
+      const updatePlan = () => {
+        if (!plannedNow()) return;
+        const fd = new FormData(form);
+        const plan = planDive({ depth: curDepth(), duration: okNum(parseNum(fd.get('duration'))), tanks, ...readPlan() });
+        $('[data-plan-out]', form).innerHTML = planHtml(plan, tanks);
+      };
       const gasTotal = () => {
         let have = 0;
         let used = 0;
@@ -648,18 +795,21 @@ async function pageDiveForm(id, opts = {}) {
             ? `<button type="button" class="icon-btn" data-tank-remove="${i}" aria-label="Flasche ${i + 1} entfernen">${ICON.trash}</button>` : ''}</div>
           ${rangeField({ label: 'Größe', value: t.size, min: 1, max: 30, step: 0.5, unit: 'l', dec: 1, def: 12, attrs: `data-i="${i}" data-key="size"` })}
           <div class="field"><span class="field-label">Gas</span>${segmented(`t${i}_gas`, [['luft', 'Luft'], ['nitrox', 'Nitrox']], t.gas || 'luft')}</div>
-          ${t.gas === 'nitrox' ? `${rangeField({ label: 'O₂-Anteil', value: t.o2, min: 22, max: 100, step: 1, unit: '%', dec: 0, def: 32, attrs: `data-i="${i}" data-key="o2"` })}
-            <p class="hint mod-hint" data-mod="${i}">${modText(t.o2 ?? 32)}</p>` : ''}
+          ${t.gas === 'nitrox' ? rangeField({ label: 'O₂-Anteil', value: t.o2, min: 22, max: 100, step: 1, unit: '%', dec: 0, def: 32, attrs: `data-i="${i}" data-key="o2"` }) : ''}
+          <p class="hint mod-hint" data-mod="${i}"></p>
           ${rangeField({ label: isPlanned ? 'Fülldruck' : 'Druck Anfang', value: dv('pressure', t.pStart), min: 0, max: P.max, step: P.step,
             unit: unit('pressure').label, dec: 0, def: P.def, attrs: `data-i="${i}" data-key="pStart"` })}
           ${isPlanned ? '' : rangeField({ label: 'Druck Ende', value: dv('pressure', t.pEnd), min: 0, max: P.max, step: P.step,
             unit: unit('pressure').label, dec: 0, def: P.def / 4, attrs: `data-i="${i}" data-key="pEnd"` })}
         </div>`).join('');
         gasTotal();
+        updateHints();
+        updatePlan();
       };
       const applyStatus = () => {
         const isPlanned = plannedNow();
         $$('[data-only-done]', form).forEach(el => { el.hidden = isPlanned; });
+        $$('[data-only-planned]', form).forEach(el => { el.hidden = !isPlanned; });
         if (!isPlanned && !form.elements.nr.value) form.elements.nr.value = nextNr;
         drawTanks();
       };
@@ -670,13 +820,15 @@ async function pageDiveForm(id, opts = {}) {
         if (!el.closest('.range-field')) return;
         syncRange(el);
         const key = el.dataset.key;
-        if (!key) return;
-        const i = Number(el.dataset.i);
-        const v = parseNum($('input[type=text]', el.closest('.range-field')).value);
-        if (v == null) tanks[i][key] = null;
-        else if (!Number.isNaN(v)) tanks[i][key] = key.startsWith('p') ? toMetric('pressure', v) : v;
-        if (key === 'o2') { const h = $(`[data-mod="${i}"]`, form); if (h) h.textContent = modText(tanks[i].o2 ?? 0); }
+        if (key) {
+          const i = Number(el.dataset.i);
+          const v = parseNum($('input[type=text]', el.closest('.range-field')).value);
+          if (v == null) tanks[i][key] = null;
+          else if (!Number.isNaN(v)) tanks[i][key] = key.startsWith('p') ? toMetric('pressure', v) : v;
+        }
         gasTotal();
+        updateHints();
+        updatePlan();
       });
       const drawPhotos = () => {
         grid.innerHTML = photos.map((p, i) => `<div class="photo-thumb"><img alt="Foto ${i + 1}" data-zoom>
@@ -694,6 +846,7 @@ async function pageDiveForm(id, opts = {}) {
           drawTanks();
         }
         if (e.target.name === 'status') applyStatus();
+        if (e.target.name === 'planStop') updatePlan();
         if (e.target.dataset.photoInput) { photos.push(...await readPhotoInput(e.target)); drawPhotos(); }
       });
       form.addEventListener('click', async e => {
@@ -748,6 +901,7 @@ async function pageDiveForm(id, opts = {}) {
           waterTemp: num('waterTemp', 'temp'),
           visibility: num('visibility', 'depth'),
           tanks: cleanTanks,
+          plan: isPlanned ? readPlan() : d.plan,
           // erste Flasche zusätzlich in den alten Einzelfeldern (für ältere Versionen/Backups)
           tankSize: t0.size ?? null,
           gas: t0.gas || 'luft',
@@ -774,6 +928,7 @@ async function pageDiveForm(id, opts = {}) {
           toast('Speichern fehlgeschlagen: ' + err.message, 5000, true);
           return;
         }
+        if (rec.planned) { settings.plan = rec.plan; await setKV('settings', settings); }   // als Vorgabe für die nächste Planung merken
         toast(rec.planned ? 'Tauchgang geplant' : `Tauchgang ${rec.nr != null ? '#' + rec.nr + ' ' : ''}gespeichert`);
         goBack(id ? `logbuch/${id}` : 'logbuch');
       });
@@ -818,6 +973,9 @@ async function pageDiveDetail(id) {
         ['Blei', d.weight != null ? dispU('weight', d.weight) : ''],
         ['Buddy', d.buddy],
       ]) || '<p class="hint" style="margin:0">Keine weiteren Angaben.</p>'}</div>
+      ${d.planned && tanks.length ? `<h2 class="section-title">Tauchgangsplan</h2><div class="card">${planHtml(planDive({
+        depth: d.maxDepth, duration: d.duration, tanks, ...PLAN_DEFAULTS, ...(settings.plan || {}), ...(d.plan || {}),
+      }), tanks)}</div>` : ''}
       ${d.notes ? `<h2 class="section-title">Notizen</h2><div class="card"><p class="notes">${esc(d.notes)}</p></div>` : ''}
       ${d.photos?.length ? `<h2 class="section-title">Fotos</h2><div class="photo-grid">
         ${d.photos.map((p, i) => `<img data-photo="${esc(p)}" data-zoom alt="Foto ${i + 1}">`).join('')}</div>` : ''}

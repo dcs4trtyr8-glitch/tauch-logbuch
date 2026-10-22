@@ -91,7 +91,11 @@ Austausch ganz ohne Server, per Nachricht (z. B. WhatsApp):
 
 ## Flaschen (ab 1.2)
 
-Beliebig viele Flaschen pro Tauchgang (z. B. Stage oder Deko), jeweils mit Schieberegler und Zahlenfeld für Größe, O₂-Anteil und Druck. Bei Nitrox zeigt die App die MOD bei ppO₂ 1,4 und 1,6, darunter den gesamten Gasvorrat und den Verbrauch. Ältere Einträge mit einer Flasche werden automatisch übernommen.
+Beliebig viele Flaschen pro Tauchgang (z. B. Stage oder Deko), jeweils mit Schieberegler und Zahlenfeld für Größe, O₂-Anteil und Druck. Bei Nitrox zeigt die App die MOD bei ppO₂ 1,4 und 1,6, darunter den gesamten Gasvorrat und den Verbrauch. Ältere Einträge mit einer Flasche werden automatisch übernommen. MOD und ppO₂ in der eingestellten Tiefe stehen auch bei Luft dabei.
+
+## Tauchgangsplan (ab 1.3)
+
+Bei geplanten Tauchgängen: Atemminutenvolumen (SAC), Aufstiegsgeschwindigkeit, Reserve und Sicherheitsstopp einstellen. Die App rechnet Grundzeit, Aufstiegsdauer und Gaswechsel (bei ppO₂ 1,6, auf 3 m abgerundet), dazu den Gasbedarf pro Flasche samt Enddruck und die EAD. Sie zeigt ein kleines Profil und warnt bei zu hohem ppO₂ oder zu wenig Gas. **Keine Dekompressionsberechnung** – Nullzeit und Deko-Stopps immer mit dem Tauchcomputer planen.
 
 ## 6. Später etwas ändern
 

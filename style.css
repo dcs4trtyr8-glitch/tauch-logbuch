@@ -15,6 +15,7 @@
   --danger-soft: #fde3e7;
   --warn-soft: #fff1c2;
   --warn-text: #4a3500;
+  --warn: #a15c00;
   --shadow: 0 1px 2px rgba(10, 23, 38, .08), 0 3px 10px rgba(10, 23, 38, .06);
   --radius: 14px;
   --tabbar-h: 66px;
@@ -37,6 +38,7 @@
     --danger-soft: #3d121a;
     --warn-soft: #3d3110;
     --warn-text: #ffe7a3;
+    --warn: #ffbe3d;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4);
   }
 }
@@ -368,7 +370,15 @@ main {
 }
 .tank-card { margin-top: 12px; padding: 2px 14px 14px; border: 2px solid var(--border); border-radius: 12px; }
 .tank-head { display: flex; align-items: center; justify-content: space-between; min-height: 48px; margin-top: 4px; }
-.mod-hint { margin: 6px 2px 0; }
+.mod-hint { margin: 8px 2px 0; }
+.pp-warn { color: var(--warn); font-weight: 700; }
+.pp-bad { color: var(--danger); font-weight: 700; }
+.plan-warn { margin: 12px 0 0; background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+.plan-profile { display: block; width: 100%; height: auto; margin: 4px 0 8px; }
+.plan-profile text { fill: var(--muted); stroke: none; font-size: 11px; font-weight: 600; }
+.plan-axis { stroke: var(--border); stroke-width: 1.5; }
+.plan-line { fill: none; stroke: var(--primary); stroke-width: 3; }
+.plan-switch { fill: var(--warn); stroke: var(--surface); stroke-width: 2; }
 
 /* Kamera */
 .scan-box { position: relative; overflow: hidden; aspect-ratio: 3 / 4; border-radius: 16px; background: #000; }

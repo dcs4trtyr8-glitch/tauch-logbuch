@@ -5,12 +5,14 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
+const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
-const STORES = ['dives', 'certs', 'hotlines', 'contacts', 'photos', 'kv'];
-const DATA_STORES = ['dives', 'certs', 'hotlines', 'contacts', 'kv'];
+const STORES = ['dives', 'certs', 'hotlines', 'contacts', 'photos', 'kv', 'buddies'];
+const DATA_STORES = ['dives', 'certs', 'hotlines', 'contacts', 'kv', 'buddies'];
 const BACKUP_FORMAT = 'tauch-logbuch-backup';
+const SHARE_RE = /TLB([01]):([A-Za-z0-9_-]+)/;   // Buddy-Code: TLB1 = komprimiert, TLB0 = unkomprimiert
 const DEFAULT_SETTINGS = { depth: 'm', pressure: 'bar', temp: 'C', weight: 'kg' };
 
 const DAN_NUMMER = '+39 06 4211 5685';
@@ -79,6 +81,10 @@ const ICON = {
   download: svg('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
   upload: svg('<path d="M12 16V5M7 10l5-5 5 5M5 20h14"/>'),
   share: svg('<path d="M12 3v12M8 7l4-4 4 4"/><path d="M5 12v8h14v-8"/>'),
+  users: svg('<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><circle cx="17" cy="9" r="2.6"/><path d="M15.5 14.2A5 5 0 0 1 21 19"/>'),
+  copy: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>'),
+  calendar: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
+  paste: svg('<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 11h6M9 15h4"/>'),
 };
 
 /* =========================================================
@@ -91,7 +97,7 @@ let persistAsked = false;
 
 function openDB(name) {
   return new Promise((resolve, reject) => {
-    const r = indexedDB.open(name, 1);
+    const r = indexedDB.open(name, DB_VERSION);
     r.onupgradeneeded = () => {
       for (const s of STORES) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' });
     };
@@ -346,8 +352,17 @@ const ID = '([\\w-]+)';
 const ROUTES = [
   ['logbuch', pageLogbuch],
   ['logbuch/neu', () => pageDiveForm(null)],
+  ['logbuch/plan', () => pageDiveForm(null, { planned: true })],
+  [`logbuch/plan/${ID}`, buddyId => pageDiveForm(null, { planned: true, buddyId })],
   [`logbuch/${ID}/bearbeiten`, id => pageDiveForm(id)],
+  [`logbuch/${ID}/nachtragen`, id => pageDiveForm(id, { complete: true })],
+  [`logbuch/${ID}/teilen`, id => pageDiveShare(id)],
   [`logbuch/${ID}`, pageDiveDetail],
+  ['buddys', () => pageBuddys()],
+  ['buddys/teilen', () => pageMyCard()],
+  ['buddys/einfuegen', () => pageImportPaste()],
+  [`buddys/${ID}`, id => pageBuddyDetail(id)],
+  ['import=(.+)', raw => pageImportLink(raw)],
   ['brevets', pageBrevets],
   ['brevets/neu', () => pageCertForm(null)],
   [`brevets/${ID}/bearbeiten`, id => pageCertForm(id)],
@@ -417,8 +432,29 @@ const notFound = parent => ({
 /* =========================================================
    1. Logbuch
    ========================================================= */
+function diveItem(d) {
+  const lead = d.planned
+    ? `<span class="dive-nr">${ICON.calendar}</span>`
+    : `<span class="dive-nr">${d.nr != null ? esc(d.nr) : '–'}</span>`;
+  const figs = d.planned
+    ? '<span class="dive-figs"><small>geplant</small></span>'
+    : `<span class="dive-figs">${dispU('depth', d.maxDepth)}<small>${d.duration != null ? `${fmt(d.duration, 0)} min` : '–'}</small></span>`;
+  const extra = d.planned && d.buddy ? ` · mit ${esc(d.buddy)}` : d.location ? ` · ${esc(d.location)}` : '';
+  return `<li><a class="dive-item${d.planned ? ' is-planned' : ''}" href="#logbuch/${d.id}">
+      ${lead}
+      <span class="dive-main">
+        <span class="dive-site">${esc(d.site)}</span>
+        <span class="dive-date">${fmtDate(d.date)}${d.time ? ` · ${esc(d.time)}` : ''}${extra}</span>
+      </span>
+      ${figs}
+    </a></li>`;
+}
+
 async function pageLogbuch() {
-  const dives = sortDives(await dbAll('dives'));
+  const all = await dbAll('dives');
+  const dives = sortDives(all.filter(d => !d.planned));
+  const planned = all.filter(d => d.planned)
+    .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.time || '').localeCompare(b.time || ''));
   const total = dives.reduce((s, d) => s + (d.duration || 0), 0);
   const deepest = dives.reduce((b, d) => (d.maxDepth != null && (!b || d.maxDepth > b.maxDepth) ? d : b), null);
 
@@ -432,14 +468,7 @@ async function pageLogbuch() {
     }
   }
 
-  const items = dives.map(d => `<li><a class="dive-item" href="#logbuch/${d.id}">
-      <span class="dive-nr">${d.nr != null ? esc(d.nr) : '–'}</span>
-      <span class="dive-main">
-        <span class="dive-site">${esc(d.site)}</span>
-        <span class="dive-date">${fmtDate(d.date)}${d.time ? ` · ${esc(d.time)}` : ''}${d.location ? ` · ${esc(d.location)}` : ''}</span>
-      </span>
-      <span class="dive-figs">${dispU('depth', d.maxDepth)}<small>${d.duration != null ? `${fmt(d.duration, 0)} min` : '–'}</small></span>
-    </a></li>`).join('');
+  const items = dives.map(diveItem).join('');
 
   return {
     title: 'Logbuch',
@@ -451,45 +480,60 @@ async function pageLogbuch() {
           <div class="stat-label">Tiefster</div>${deepest ? `<div class="stat-sub">${esc(deepest.site)}</div>` : ''}</div>
       </div>
       <a class="btn btn-primary btn-big btn-block" href="#logbuch/neu">${ICON.plus}Neuer Tauchgang</a>
-      ${dives.length ? `<ul class="list">${items}</ul>`
+      <a class="btn btn-block" href="#logbuch/plan" style="margin-top:10px">${ICON.calendar}Tauchgang planen</a>
+      ${planned.length ? `<h2 class="section-title">Geplant</h2><ul class="list" style="margin-top:0">${planned.map(diveItem).join('')}</ul>
+        ${dives.length ? '<h2 class="section-title">Logbuch</h2>' : ''}` : ''}
+      ${dives.length ? `<ul class="list"${planned.length ? ' style="margin-top:0"' : ''}>${items}</ul>`
         : `<div class="empty"><strong>Noch keine Tauchgänge</strong>Trag deinen ersten Tauchgang ein – nur Datum und Tauchplatz sind Pflicht.</div>`}`,
   };
 }
 
-async function pageDiveForm(id) {
+async function pageDiveForm(id, opts = {}) {
   const dives = await dbAll('dives');
+  const buddies = await dbAll('buddies');
+  const logged = dives.filter(x => !x.planned && x.id !== id);
+  const nextNr = Math.max(0, ...logged.map(x => x.nr || 0)) + 1;
+  const lastWith = k => sortDives(logged).find(x => x[k] != null)?.[k] ?? null;
   let d;
   if (id) {
     d = dives.find(x => x.id === id);
     if (!d) return notFound('logbuch');
+    d = { ...d };
   } else {
-    // Ausrüstung vom letzten Tauchgang vorschlagen → weniger tippen
-    const last = sortDives(dives)[0] || {};
-    d = {
-      nr: Math.max(0, ...dives.map(x => x.nr || 0)) + 1,
-      date: todayISO(), gas: 'luft',
-      tankSize: last.tankSize ?? null, suit: last.suit ?? null, weight: last.weight ?? null,
-      photos: [],
-    };
+    const buddy = opts.buddyId ? buddies.find(b => b.id === opts.buddyId) : null;
+    d = { date: todayISO(), gas: 'luft', photos: [], planned: !!opts.planned, buddy: buddy?.name || '', buddyIds: buddy ? [buddy.id] : [] };
+  }
+  if (opts.complete) d.planned = false;
+  if (!d.planned && d.nr == null) {
+    // Nummer hochzählen, Ausrüstung vom letzten Tauchgang vorschlagen → weniger tippen
+    d.nr = nextNr;
+    d.tankSize ??= lastWith('tankSize');
+    d.suit ??= lastWith('suit');
+    d.weight ??= lastWith('weight');
   }
   const photos = (d.photos || []).map(pid => ({ id: pid }));
 
   return {
-    title: id ? `Tauchgang ${d.nr != null ? '#' + d.nr : ''} bearbeiten` : 'Neuer Tauchgang',
+    title: opts.complete ? 'Tauchgang nachtragen'
+      : id ? (d.planned ? 'Planung bearbeiten' : `Tauchgang ${d.nr != null ? '#' + d.nr : ''} bearbeiten`)
+        : (d.planned ? 'Tauchgang planen' : 'Neuer Tauchgang'),
     back: id ? `logbuch/${id}` : 'logbuch',
     html: `<form id="dive-form" novalidate>
       <fieldset class="form-card"><legend>Allgemein</legend>
+        <div class="field"><span class="field-label">Status</span>
+          ${segmented('status', [['done', 'Getaucht'], ['planned', 'Geplant']], d.planned ? 'planned' : 'done')}</div>
         <div class="grid2">
-          ${field({ label: 'Tauchgang-Nr.', name: 'nr', value: d.nr ?? '', mode: 'numeric' })}
+          <div data-only-done>${field({ label: 'Tauchgang-Nr.', name: 'nr', value: d.nr ?? '', mode: 'numeric' })}</div>
           ${field({ label: 'Einstiegszeit', name: 'time', type: 'time', value: d.time })}
         </div>
         ${field({ label: 'Datum', name: 'date', type: 'date', value: d.date, required: true })}
       </fieldset>
-      <fieldset class="form-card"><legend>Ort</legend>
+      <fieldset class="form-card"><legend>Ort &amp; Buddy</legend>
         ${field({ label: 'Tauchplatz / Gewässer', name: 'site', value: d.site, required: true, list: 'dl-site', placeholder: 'z. B. Kreidesee Hemmoor' })}
         ${field({ label: 'Land / Ort', name: 'location', value: d.location, list: 'dl-location', placeholder: 'z. B. Hemmoor, Deutschland' })}
+        ${field({ label: 'Buddy', name: 'buddy', value: d.buddy, list: 'dl-buddy' })}
       </fieldset>
-      <fieldset class="form-card"><legend>Tauchgang</legend>
+      <fieldset class="form-card" data-only-done><legend>Tauchgang</legend>
         <div class="grid2">
           ${numField('Max. Tiefe', 'maxDepth', 'depth', d.maxDepth)}
           ${field({ label: 'Tauchzeit', name: 'duration', value: d.duration ?? '', mode: 'numeric', unit: 'min' })}
@@ -497,7 +541,7 @@ async function pageDiveForm(id) {
           ${numField('Sicht', 'visibility', 'depth', d.visibility)}
         </div>
       </fieldset>
-      <fieldset class="form-card"><legend>Flasche &amp; Gas</legend>
+      <fieldset class="form-card" data-only-done><legend>Flasche &amp; Gas</legend>
         ${field({ label: 'Flaschengröße', name: 'tankSize', value: d.tankSize != null ? fmtPlain(d.tankSize) : '', mode: 'decimal', unit: 'l' })}
         <div class="field"><span class="field-label">Gas</span>${segmented('gas', [['luft', 'Luft'], ['nitrox', 'Nitrox']], d.gas || 'luft')}</div>
         <div id="o2-field"${d.gas === 'nitrox' ? '' : ' hidden'}>
@@ -508,27 +552,32 @@ async function pageDiveForm(id) {
           ${numField('Druck Ende', 'pEnd', 'pressure', d.pEnd)}
         </div>
       </fieldset>
-      <fieldset class="form-card"><legend>Ausrüstung &amp; Buddy</legend>
+      <fieldset class="form-card" data-only-done><legend>Ausrüstung</legend>
         <div class="field"><span class="field-label">Anzug</span>
           ${segmented('suit', [['nass', 'Nass'], ['halbtrocken', 'Halb&shy;trocken'], ['trocken', 'Trocki']], d.suit, true)}</div>
         ${numField('Blei', 'weight', 'weight', d.weight)}
-        ${field({ label: 'Buddy', name: 'buddy', value: d.buddy, list: 'dl-buddy' })}
       </fieldset>
       <fieldset class="form-card"><legend>Notizen</legend>
         ${field({ label: 'Was war los? Tiere, Strömung, Besonderheiten …', name: 'notes', type: 'textarea', value: d.notes })}
       </fieldset>
-      <fieldset class="form-card"><legend>Fotos (optional)</legend>
+      <fieldset class="form-card" data-only-done><legend>Fotos (optional)</legend>
         <div id="photo-edit" class="photo-edit"></div>
         ${photoButtons('dive', true)}
       </fieldset>
       ${saveBar()}
       ${datalist('dl-site', unique(dives.map(x => x.site)))}
       ${datalist('dl-location', unique(dives.map(x => x.location)))}
-      ${datalist('dl-buddy', unique(dives.map(x => x.buddy)))}
+      ${datalist('dl-buddy', unique([...dives.map(x => x.buddy), ...buddies.map(b => b.name)]))}
     </form>`,
     after(view) {
       const form = $('#dive-form', view);
       const grid = $('#photo-edit', view);
+      const applyStatus = () => {
+        const isPlanned = form.elements.status.value === 'planned';
+        $$('[data-only-done]', form).forEach(el => { el.hidden = isPlanned; });
+        if (!isPlanned && !form.elements.nr.value) form.elements.nr.value = nextNr;
+      };
+      applyStatus();
       const drawPhotos = () => {
         grid.innerHTML = photos.map((p, i) => `<div class="photo-thumb"><img alt="Foto ${i + 1}" data-zoom>
           <button type="button" class="photo-remove" data-remove="${i}" aria-label="Foto entfernen">×</button></div>`).join('');
@@ -538,6 +587,7 @@ async function pageDiveForm(id) {
 
       form.addEventListener('change', async e => {
         if (e.target.name === 'gas') $('#o2-field', form).hidden = form.elements.gas.value !== 'nitrox';
+        if (e.target.name === 'status') applyStatus();
         if (e.target.dataset.photoInput) { photos.push(...await readPhotoInput(e.target)); drawPhotos(); }
       });
       form.addEventListener('click', async e => {
@@ -553,10 +603,13 @@ async function pageDiveForm(id) {
         clearErrors(form);
         const { text, num, errors } = formReader(form, d);
         const gas = text('gas') || 'luft';
+        const isPlanned = text('status') === 'planned';
+        const buddyText = text('buddy');
         const rec = {
           ...d,
           id: d.id || uid(),
-          nr: num('nr'),
+          planned: isPlanned,
+          nr: isPlanned ? null : num('nr'),
           date: text('date'),
           time: text('time'),
           site: text('site'),
@@ -572,7 +625,10 @@ async function pageDiveForm(id) {
           pEnd: num('pEnd', 'pressure'),
           suit: text('suit') || null,
           weight: num('weight', 'weight'),
-          buddy: text('buddy'),
+          buddy: buddyText,
+          // Verknüpfung zu Buddys behalten bzw. über den Namen neu finden
+          buddyIds: buddyText === (d.buddy || '') && d.buddyIds?.length
+            ? d.buddyIds : buddies.filter(b => nameMatch(buddyText, b.name)).map(b => b.id),
           notes: text('notes'),
           photos: photos.map(p => p.id),
           created: d.created || Date.now(),
@@ -588,7 +644,7 @@ async function pageDiveForm(id) {
           toast('Speichern fehlgeschlagen: ' + err.message, 5000, true);
           return;
         }
-        toast(`Tauchgang ${rec.nr != null ? '#' + rec.nr + ' ' : ''}gespeichert`);
+        toast(rec.planned ? 'Tauchgang geplant' : `Tauchgang ${rec.nr != null ? '#' + rec.nr + ' ' : ''}gespeichert`);
         goBack(id ? `logbuch/${id}` : 'logbuch');
       });
     },
@@ -611,16 +667,16 @@ async function pageDiveDetail(id) {
   const tile = (label, v) => `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
 
   return {
-    title: `Tauchgang ${d.nr != null ? '#' + d.nr : ''}`,
+    title: d.planned ? 'Geplanter Tauchgang' : `Tauchgang ${d.nr != null ? '#' + d.nr : ''}`,
     back: 'logbuch',
     html: `<div class="detail-head"><h2>${esc(d.site)}</h2>
         <p>${fmtDate(d.date)}${d.time ? `, ${esc(d.time)} Uhr` : ''}${d.location ? ` · ${esc(d.location)}` : ''}</p></div>
-      <div class="tiles">
+      ${d.planned ? `<p class="planned-badge">${ICON.calendar}Geplant${d.buddy ? ` mit ${esc(d.buddy)}` : ''}</p>` : `<div class="tiles">
         ${tile('Max. Tiefe', dispU('depth', d.maxDepth))}
         ${tile('Tauchzeit', d.duration != null ? `${fmt(d.duration, 0)} min` : '–')}
         ${tile('Wasser', dispU('temp', d.waterTemp))}
         ${tile('Sicht', dispU('depth', d.visibility))}
-      </div>
+      </div>`}
       <div class="card">${kvList([
         ['Flasche', d.tankSize != null ? `${fmt(d.tankSize)} l` : ''],
         ['Gas', gas],
@@ -633,14 +689,16 @@ async function pageDiveDetail(id) {
       ${d.notes ? `<h2 class="section-title">Notizen</h2><div class="card"><p class="notes">${esc(d.notes)}</p></div>` : ''}
       ${d.photos?.length ? `<h2 class="section-title">Fotos</h2><div class="photo-grid">
         ${d.photos.map((p, i) => `<img data-photo="${esc(p)}" data-zoom alt="Foto ${i + 1}">`).join('')}</div>` : ''}
-      <div class="btn-row" style="margin-top:18px">
+      ${d.planned ? `<a class="btn btn-primary btn-big btn-block" href="#logbuch/${d.id}/nachtragen" style="margin-top:18px">${ICON.edit}Tauchgang nachtragen</a>` : ''}
+      <a class="btn btn-block" href="#logbuch/${d.id}/teilen" style="margin-top:${d.planned ? 10 : 18}px">${ICON.share}Mit Buddy teilen</a>
+      <div class="btn-row" style="margin-top:10px">
         <button type="button" class="btn btn-outline-danger" data-delete>${ICON.trash}Löschen</button>
-        <a class="btn btn-primary" href="#logbuch/${d.id}/bearbeiten">${ICON.edit}Bearbeiten</a>
+        <a class="btn${d.planned ? '' : ' btn-primary'}" href="#logbuch/${d.id}/bearbeiten">${ICON.edit}Bearbeiten</a>
       </div>`,
     after(view) {
       $('[data-delete]', view).addEventListener('click', async () => {
         const ok = await confirmDialog({
-          title: 'Tauchgang löschen?',
+          title: d.planned ? 'Planung löschen?' : 'Tauchgang löschen?',
           text: `${d.nr != null ? '#' + d.nr + ' · ' : ''}${d.site} vom ${fmtDate(d.date)} wird endgültig gelöscht${d.photos?.length ? ', inklusive Fotos' : ''}.`,
           ok: 'Löschen', danger: true,
         });
@@ -1247,7 +1305,18 @@ async function seedDemo() {
     dive(4, '2026-08-09', '09:15', 'Ras Mohammed – Shark Reef', 'Sharm el-Sheikh, Ägypten', 27.3, 52, 27, 30, { gas: 'nitrox', o2: 32, suit: 'nass', weight: 4, buddy: 'Guide Ahmed', notes: 'Strömung von Nord, großer Napoleon an der Kante.' }),
     dive(5, '2026-08-10', '08:45', 'SS Thistlegorm', 'Rotes Meer, Ägypten', 30.1, 46, 26, 20, { tankSize: 15, gas: 'nitrox', o2: 28, suit: 'nass', weight: 4, pStart: 210, pEnd: 70, buddy: 'Guide Ahmed' }),
     dive(6, '2026-09-26', '13:20', 'Zeelandbrug – Oosterschelde', 'Zierikzee, Niederlande', 14.2, 61, 16, 3, { notes: 'Bei Stillwasser. Sepien und Seenelken.' }),
+    dive(null, '2026-11-07', '10:00', 'Kreidesee Hemmoor', 'Hemmoor, Deutschland', null, null, null, null,
+      { planned: true, pStart: null, pEnd: null, buddyIds: ['demo-buddy-jonas'], notes: 'Treffpunkt 9:30 an der Basis.' }),
   ];
+  const buddies = [{
+    id: 'demo-buddy-jonas', name: 'Jonas',
+    certs: [
+      { org: 'PADI', level: 'Rescue Diver', date: '2024-09-14', number: 'BSP-222222', img: '' },
+      { org: 'PADI', level: 'Enriched Air Diver', date: '2024-05-02', number: '', img: '' },
+    ],
+    stats: { count: 87, totalMin: 4380, deepest: 38.5, last: { date: '2026-10-11', site: 'Fühlinger See' } },
+    sharedAt: '2026-10-12T18:00:00.000Z', receivedAt: new Date().toISOString(), created: now,
+  }];
   const photos = [
     { id: uid(), blob: await demoCardImage('PADI', 'Open Water Diver', '#1565c0') },
     { id: uid(), blob: await demoCardImage('PADI', 'Open Water Diver', '#1565c0', true) },
@@ -1270,8 +1339,455 @@ async function seedDemo() {
     hotlines.forEach(h => t.objectStore('hotlines').put(h));
     contacts.forEach(c => t.objectStore('contacts').put(c));
     photos.forEach(p => t.objectStore('photos').put(p));
+    buddies.forEach(b => t.objectStore('buddies').put(b));
     t.objectStore('kv').put({ id: 'profile', value: profile });
   });
+}
+
+/* =========================================================
+   5. Buddys – Austausch per Code/Link, ganz ohne Server
+   ========================================================= */
+const norm = s => String(s || '').toLowerCase().trim();
+const nameMatch = (text, name) => !!norm(name) && norm(text).includes(norm(name));
+const initials = name => String(name || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+const cleanStr = (v, max = 200) => (v == null ? '' : String(v).slice(0, max));
+const cleanId = v => (/^[\w-]{1,64}$/.test(String(v ?? '')) ? String(v) : null);
+const cleanNum = v => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+const check = (name, label, hint, checked) => `<label class="check"><input type="checkbox" name="${name}"${checked ? ' checked' : ''}>
+  <span><strong>${esc(label)}</strong>${hint ? `<small>${esc(hint)}</small>` : ''}</span></label>`;
+
+// Eigene, zufällige Kennung – damit der Buddy Aktualisierungen derselben Person zuordnen kann
+async function getMe() {
+  let me = await getKV('me');
+  if (!me?.id) { me = { id: uid(), name: '' }; await setKV('me', me); }
+  return me;
+}
+
+/* ---------- Code: JSON → komprimiert → Base64 (URL-tauglich) ---------- */
+function b64url(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function fromB64url(str) {
+  const s = str.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(s + '==='.slice((s.length + 3) % 4));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+const pipeBytes = (bytes, stream) =>
+  new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer().then(b => new Uint8Array(b));
+
+async function encodeShare(obj) {
+  const json = new TextEncoder().encode(JSON.stringify({ app: 'tlb', v: 1, ...obj }));
+  if (typeof CompressionStream === 'function') return 'TLB1:' + b64url(await pipeBytes(json, new CompressionStream('deflate-raw')));
+  return 'TLB0:' + b64url(json);
+}
+async function decodeShare(text) {
+  const m = String(text || '').replace(/%3A/gi, ':').replace(/\s+/g, '').match(SHARE_RE);
+  if (!m) throw new Error('Kein Tauch-Logbuch-Code gefunden.');
+  let obj;
+  try {
+    let bytes = fromB64url(m[2]);
+    if (m[1] === '1') bytes = await pipeBytes(bytes, new DecompressionStream('deflate-raw'));
+    obj = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error('Der Code ist unvollständig oder beschädigt. Bitte die ganze Nachricht kopieren.');
+  }
+  if (obj?.app !== 'tlb' || !['buddy', 'dive'].includes(obj.t)) throw new Error('Unbekannter Code.');
+  return obj;
+}
+const shareLink = code => `${location.origin}${location.pathname}#import=${code}`;
+
+async function shareText(text, title) {
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+    try { await navigator.share({ title, text }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  await copyText(text);
+}
+async function copyText(text, msg = 'Kopiert – jetzt z. B. in WhatsApp einfügen') {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
+  toast(msg);
+}
+
+// Teilen-Kasten: Code bei jeder Änderung neu bauen, damit "Teilen" sofort (mit Antipp-Berechtigung) geht
+const shareBox = () => `<div class="card">
+    <p class="meta-line" data-code-info>Code wird erstellt …</p>
+    <div class="stack">
+      <button type="button" class="btn btn-primary btn-big btn-block" data-share disabled>${ICON.share}Teilen</button>
+      <button type="button" class="btn btn-block" data-copy disabled>${ICON.copy}Nachricht kopieren</button>
+    </div>
+    <p class="hint">„Teilen“ öffnet z. B. WhatsApp oder Nachrichten. Dein Buddy kopiert die Nachricht und fügt sie in seiner App unter Buddys → „Code einfügen“ ein.</p>
+  </div>`;
+function bindShareBox(view, form, build, title) {
+  const info = $('[data-code-info]', view);
+  const bShare = $('[data-share]', view);
+  const bCopy = $('[data-copy]', view);
+  let message = '';
+  let seq = 0;
+  let timer;
+  const rebuild = async () => {
+    const mine = ++seq;
+    message = '';
+    bShare.disabled = bCopy.disabled = true;
+    info.textContent = 'Code wird erstellt …';
+    try {
+      const m = await build(new FormData(form));
+      if (mine !== seq) return;
+      message = m;
+      info.textContent = `Fertig – Nachricht mit ${fmt(m.length / 1024)} KB Text.`;
+      bShare.disabled = bCopy.disabled = false;
+    } catch (e) {
+      if (mine === seq) info.textContent = e.message;
+    }
+  };
+  form.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(rebuild, 400); });
+  form.addEventListener('change', () => { clearTimeout(timer); rebuild(); });
+  form.addEventListener('submit', e => e.preventDefault());
+  bShare.addEventListener('click', () => shareText(message, title));
+  bCopy.addEventListener('click', () => copyText(message));
+  rebuild();
+}
+async function myName(fd) {
+  const name = String(fd.get('name') || '').trim();
+  if (!name) throw new Error('Bitte oben deinen Namen eintragen.');
+  const me = await getMe();
+  if (me.name !== name) await setKV('me', { ...me, name });
+  return { ...me, name };
+}
+async function defaultName() {
+  return (await getMe()).name || ((await getKV('profile')) || {}).name || '';
+}
+
+/* ---------- Buddy-Liste ---------- */
+function buddyItem(b) {
+  const s = b.stats;
+  const top = b.certs?.[0];
+  return `<li><a class="dive-item" href="#buddys/${esc(b.id)}">
+      <span class="avatar">${esc(initials(b.name))}</span>
+      <span class="dive-main">
+        <span class="dive-site">${esc(b.name)}</span>
+        <span class="dive-date">${top ? esc([top.org, top.level].filter(Boolean).join(' ')) : 'keine Brevets geteilt'}</span>
+      </span>
+      <span class="dive-figs">${s ? `${esc(s.count)} TG<small>${s.last ? 'zuletzt ' + fmtDate(s.last.date) : '–'}</small>` : '<small>keine Statistik</small>'}</span>
+    </a></li>`;
+}
+
+async function pageBuddys() {
+  const buddies = (await dbAll('buddies')).sort((a, b) => a.name.localeCompare(b.name, 'de'));
+  return {
+    title: 'Buddys',
+    html: `<div class="stack">
+        <a class="btn btn-primary btn-big btn-block" href="#buddys/teilen">${ICON.share}Meine Buddy-Karte teilen</a>
+        <a class="btn btn-block" href="#buddys/einfuegen">${ICON.paste}Code von Buddy einfügen</a>
+      </div>
+      ${buddies.length ? `<ul class="list">${buddies.map(buddyItem).join('')}</ul>`
+        : `<div class="empty"><strong>Noch keine Buddys</strong>Schick deinem Tauchpartner deine Buddy-Karte und lass dir seine schicken.</div>`}
+      <p class="hint">So funktioniert's: Ihr tauscht Codes, z. B. per WhatsApp – ganz ohne Server. Die Daten deines Buddys sind so aktuell wie der letzte Code, den er dir geschickt hat.</p>`,
+  };
+}
+
+async function pageBuddyDetail(id) {
+  const b = await dbGet('buddies', id);
+  if (!b) return notFound('buddys');
+  const s = b.stats;
+  const shared = (await dbAll('dives')).filter(d => d.buddyIds?.includes(b.id) || nameMatch(d.buddy, b.name))
+    .sort((x, y) => (y.date || '').localeCompare(x.date || ''));
+  const tile = (label, v) => `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
+  return {
+    title: b.name,
+    back: 'buddys',
+    html: `<div class="detail-head"><h2>${esc(b.name)}</h2>
+        <p>${b.sharedAt ? `Stand: ${esc(fmtDateTime(b.sharedAt))}` : 'Noch keine Buddy-Karte erhalten'}</p></div>
+      ${s ? `<div class="tiles">
+          ${tile('Tauchgänge', esc(s.count))}
+          ${tile('Letzter Tauchgang', s.last ? fmtDate(s.last.date) : '–')}
+          ${tile('Std. unter Wasser', fmtHours(s.totalMin || 0))}
+          ${tile('Tiefster', s.deepest != null ? dispU('depth', s.deepest) : '–')}
+        </div>${s.last?.site ? `<p class="hint" style="margin:-4px 4px 14px">Zuletzt: ${esc(s.last.site)}</p>` : ''}` : ''}
+      <h2 class="section-title">Brevets</h2>
+      ${b.certs?.length ? b.certs.map(c => `<div class="card cert-shared">
+          ${c.img ? `<img src="${esc(c.img)}" data-zoom alt="Brevet ${esc(c.level)}">` : ''}
+          <div class="cert-org">${esc(c.org) || 'Brevet'}</div>
+          <div class="cert-level">${esc(c.level)}</div>
+          <div class="cert-date">${[c.date ? 'ausgestellt ' + fmtDate(c.date) : '', c.number ? 'Nr. ' + c.number : ''].filter(Boolean).map(esc).join(' · ')}</div>
+        </div>`).join('') : '<p class="hint" style="margin:0 4px 12px">Keine Brevets freigegeben.</p>'}
+      <h2 class="section-title">Gemeinsame Tauchgänge</h2>
+      ${shared.length ? `<ul class="list" style="margin-top:0">${shared.map(diveItem).join('')}</ul>`
+        : '<p class="hint" style="margin:0 4px 12px">Noch keine. Trag den Namen im Feld „Buddy“ ein oder teilt Tauchgänge miteinander.</p>'}
+      <a class="btn btn-primary btn-block" href="#logbuch/plan/${esc(b.id)}" style="margin-top:18px">${ICON.calendar}Tauchgang mit ${esc(b.name)} planen</a>
+      <button type="button" class="btn btn-outline-danger btn-block" data-delete style="margin-top:10px">${ICON.trash}Buddy entfernen</button>`,
+    after(view) {
+      $('[data-delete]', view).addEventListener('click', async () => {
+        const ok = await confirmDialog({ title: 'Buddy entfernen?', text: `${b.name} und die geteilten Daten werden von diesem Handy gelöscht. Deine Tauchgänge bleiben.`, ok: 'Entfernen', danger: true });
+        if (!ok) return;
+        await dbWrite('buddies', t => t.objectStore('buddies').delete(b.id));
+        toast('Buddy entfernt');
+        goBack('buddys');
+      });
+    },
+  };
+}
+
+/* ---------- Meine Buddy-Karte ---------- */
+async function buildMyCard(me, prefs) {
+  const card = { t: 'buddy', id: me.id, name: me.name, at: new Date().toISOString() };
+  if (prefs.stats) {
+    const dives = (await dbAll('dives')).filter(d => !d.planned);
+    const last = sortDives(dives)[0];
+    card.stats = {
+      count: Math.max(dives.length, ...dives.map(d => d.nr || 0)),
+      totalMin: dives.reduce((sum, d) => sum + (d.duration || 0), 0),
+      deepest: dives.reduce((m, d) => Math.max(m, d.maxDepth || 0), 0) || null,
+      last: last ? { date: last.date, site: last.site } : null,
+    };
+  }
+  if (prefs.certs) {
+    const certs = (await dbAll('certs')).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    card.certs = [];
+    for (const c of certs) {
+      const x = { org: c.org, level: c.level, date: c.date, number: c.number };
+      if (prefs.photos && c.front) {
+        const p = await dbGet('photos', c.front);
+        if (p) x.img = await blobToDataURL(await resizeImage(p.blob, 560, 0.6));
+      }
+      card.certs.push(x);
+    }
+  }
+  return card;
+}
+
+async function pageMyCard() {
+  const prefs = { stats: true, certs: true, photos: false, ...((await getKV('sharePrefs')) || {}) };
+  const nCerts = await dbCount('certs');
+  return {
+    title: 'Meine Buddy-Karte',
+    back: 'buddys',
+    html: `<form id="card-form" novalidate>
+        <fieldset class="form-card"><legend>Das sieht dein Buddy</legend>
+          ${field({ label: 'Dein Name', name: 'name', value: await defaultName(), required: true, placeholder: 'z. B. Mike' })}
+          ${check('stats', 'Tauchstatistik', 'Anzahl Tauchgänge, letzter Tauchgang, Gesamtzeit, tiefster', prefs.stats)}
+          ${check('certs', `Brevets (${nCerts})`, 'Organisation, Stufe, Datum, Brevet-Nummer', prefs.certs)}
+          ${check('photos', 'Brevet-Fotos mitschicken', 'Vorderseite als kleines Bild – die Nachricht wird deutlich länger', prefs.photos)}
+          <p class="hint">Nie geteilt: Notfalldaten, Notfallkontakte, Notizen und Tauchgang-Fotos.</p>
+        </fieldset>
+      </form>
+      ${shareBox()}`,
+    after(view) {
+      const form = $('#card-form', view);
+      bindShareBox(view, form, async fd => {
+        const p = { stats: fd.has('stats'), certs: fd.has('certs'), photos: fd.has('photos') };
+        await setKV('sharePrefs', p);
+        const me = await myName(fd);
+        const code = await encodeShare(await buildMyCard(me, p));
+        return `🤿 Buddy-Karte von ${me.name} für das Tauch-Logbuch.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${shareLink(code)}`;
+      }, 'Buddy-Karte');
+    },
+  };
+}
+
+/* ---------- Tauchgang teilen ---------- */
+async function pageDiveShare(id) {
+  const d = await dbGet('dives', id);
+  if (!d) return notFound('logbuch');
+  return {
+    title: 'Tauchgang teilen',
+    back: `logbuch/${id}`,
+    html: `<form id="dive-share-form" novalidate>
+        <fieldset class="form-card"><legend>${d.planned ? 'Geplanter Tauchgang' : 'Tauchgang'}</legend>
+          <p class="cert-level" style="margin-top:8px">${esc(d.site)}</p>
+          <p class="meta-line">${fmtDate(d.date)}${d.time ? `, ${esc(d.time)} Uhr` : ''}${d.location ? ` · ${esc(d.location)}` : ''}</p>
+          ${field({ label: 'Dein Name', name: 'name', value: await defaultName(), required: true })}
+          ${d.notes ? check('notes', 'Notizen mitschicken', d.notes.slice(0, 80) + (d.notes.length > 80 ? ' …' : ''), d.planned) : ''}
+          <p class="hint">Geteilt werden Datum, Uhrzeit, Tauchplatz und Ort${d.planned ? '' : ', Tiefe, Tauchzeit, Wassertemperatur und Sicht'}. Dein Buddy übernimmt den Tauchgang mit einem Tipp in sein Logbuch.</p>
+        </fieldset>
+      </form>
+      ${shareBox()}`,
+    after(view) {
+      bindShareBox(view, $('#dive-share-form', view), async fd => {
+        const me = await myName(fd);
+        const dive = { sid: d.shareId || d.id, planned: !!d.planned, date: d.date, time: d.time, site: d.site, location: d.location };
+        if (!d.planned) Object.assign(dive, { maxDepth: d.maxDepth, duration: d.duration, waterTemp: d.waterTemp, visibility: d.visibility });
+        if (fd.has('notes') && d.notes) dive.notes = d.notes;
+        const code = await encodeShare({ t: 'dive', from: { id: me.id, name: me.name }, dive, at: new Date().toISOString() });
+        return `🤿 ${d.planned ? 'Geplanter Tauchgang' : 'Tauchgang'}: ${d.site}, ${fmtDate(d.date)}${d.time ? ` um ${d.time} Uhr` : ''} – von ${me.name}.\nIn der App unter Buddys → „Code einfügen“ einfügen:\n\n${shareLink(code)}`;
+      }, 'Tauchgang');
+    },
+  };
+}
+
+/* ---------- Code empfangen ---------- */
+async function importPreview(obj) {
+  if (obj.t === 'buddy') {
+    const existing = cleanId(obj.id) ? await dbGet('buddies', obj.id) : null;
+    const s = obj.stats;
+    const facts = [s ? `${cleanNum(s.count) ?? 0} Tauchgänge` : '', s?.last?.date ? `zuletzt ${fmtDate(cleanStr(s.last.date))}` : '',
+      Array.isArray(obj.certs) ? `${obj.certs.length} Brevets` : ''].filter(Boolean).join(' · ');
+    return `<div class="card"><div class="cert-org">Buddy-Karte</div><div class="cert-level">${esc(obj.name)}</div>
+      <p class="meta-line">${esc(facts) || 'nur der Name'}</p>
+      <button type="button" class="btn btn-primary btn-big btn-block" data-apply>${existing ? 'Daten aktualisieren' : 'Als Buddy hinzufügen'}</button></div>`;
+  }
+  const d = obj.dive || {};
+  const existing = (await dbAll('dives')).find(x => x.shareId === d.sid || x.id === d.sid);
+  return `<div class="card"><div class="cert-org">${d.planned ? 'Geplanter Tauchgang' : 'Tauchgang'} von ${esc(obj.from?.name)}</div>
+    <div class="cert-level">${esc(d.site)}</div>
+    <p class="meta-line">${fmtDate(cleanStr(d.date, 10))}${d.time ? `, ${esc(d.time)} Uhr` : ''}${d.location ? ` · ${esc(d.location)}` : ''}</p>
+    ${d.notes ? `<p class="notes" style="margin-bottom:12px">${esc(cleanStr(d.notes, 2000))}</p>` : ''}
+    <button type="button" class="btn btn-primary btn-big btn-block" data-apply>${existing ? 'Tauchgang aktualisieren' : 'In mein Logbuch übernehmen'}</button></div>`;
+}
+function bindImport(root, obj) {
+  $('[data-apply]', root)?.addEventListener('click', async () => {
+    try { navigate(await applyShare(obj), { replace: true }); }
+    catch (e) { toast(e.message, 4000, true); }
+  });
+}
+
+async function applyShare(obj) {
+  const me = await getMe();
+  if (obj.t === 'buddy') {
+    const id = cleanId(obj.id);
+    if (!id) throw new Error('Der Code ist ungültig.');
+    if (id === me.id) throw new Error('Das ist deine eigene Buddy-Karte.');
+    const old = await dbGet('buddies', id);
+    const s = obj.stats;
+    const rec = {
+      id,
+      name: cleanStr(obj.name, 80) || 'Buddy',
+      // Was der Buddy nicht mehr freigibt, wird hier auch entfernt
+      certs: Array.isArray(obj.certs) ? obj.certs.slice(0, 50).map(c => ({
+        org: cleanStr(c.org), level: cleanStr(c.level), date: cleanStr(c.date, 10), number: cleanStr(c.number, 60),
+        img: /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(c.img || '') ? c.img : '',
+      })) : [],
+      stats: s ? {
+        count: cleanNum(s.count) ?? 0, totalMin: cleanNum(s.totalMin) ?? 0, deepest: cleanNum(s.deepest),
+        last: s.last ? { date: cleanStr(s.last.date, 10), site: cleanStr(s.last.site) } : null,
+      } : null,
+      sharedAt: cleanStr(obj.at, 40),
+      receivedAt: new Date().toISOString(),
+      created: old?.created || Date.now(),
+    };
+    await dbWrite('buddies', t => t.objectStore('buddies').put(rec));
+    toast(old ? `${rec.name}: Daten aktualisiert` : `${rec.name} ist jetzt dein Buddy`);
+    return `buddys/${id}`;
+  }
+
+  const src = obj.dive || {};
+  const fromId = cleanId(obj.from?.id);
+  const fromName = cleanStr(obj.from?.name, 80) || 'Buddy';
+  const sid = cleanId(src.sid);
+  const shared = {
+    date: cleanStr(src.date, 10), time: cleanStr(src.time, 5), site: cleanStr(src.site), location: cleanStr(src.location),
+    maxDepth: cleanNum(src.maxDepth), duration: cleanNum(src.duration), waterTemp: cleanNum(src.waterTemp), visibility: cleanNum(src.visibility),
+  };
+  if (!sid || !/^\d{4}-\d{2}-\d{2}$/.test(shared.date) || !shared.site) throw new Error('Der Code ist ungültig.');
+  if (fromId && fromId === me.id) throw new Error('Das ist dein eigener Tauchgang.');
+
+  const dives = await dbAll('dives');
+  const existing = dives.find(d => d.shareId === sid || d.id === sid);
+  let rec;
+  if (existing) {
+    // Vorhandenen Eintrag nur ergänzen – eigene Werte werden nie überschrieben
+    rec = { ...existing, updated: Date.now() };
+    if (existing.planned) Object.assign(rec, { date: shared.date, time: shared.time, site: shared.site, location: shared.location });
+    for (const k of ['maxDepth', 'duration', 'waterTemp', 'visibility']) if (rec[k] == null) rec[k] = shared[k];
+    if (!rec.notes && src.notes) rec.notes = cleanStr(src.notes, 2000);
+  } else {
+    const planned = !!src.planned;
+    const logged = dives.filter(d => !d.planned);
+    rec = {
+      id: uid(), shareId: sid, ...shared, planned,
+      nr: planned ? null : Math.max(0, ...logged.map(d => d.nr || 0)) + 1,
+      gas: 'luft', photos: [], notes: cleanStr(src.notes, 2000), buddy: fromName, buddyIds: [],
+      created: Date.now(), updated: Date.now(),
+    };
+  }
+  if (fromId && !rec.buddyIds?.includes(fromId)) {
+    rec.buddyIds = [...(rec.buddyIds || []), fromId];
+    if (!nameMatch(rec.buddy, fromName)) rec.buddy = [rec.buddy, fromName].filter(Boolean).join(', ');
+  }
+  const knownBuddy = fromId ? await dbGet('buddies', fromId) : true;
+  await dbWrite(['dives', 'buddies'], t => {
+    t.objectStore('dives').put(rec);
+    // Absender automatisch als Buddy anlegen (Daten kommen mit seiner Buddy-Karte)
+    if (!knownBuddy) t.objectStore('buddies').put({ id: fromId, name: fromName, certs: [], stats: null, sharedAt: '', receivedAt: new Date().toISOString(), created: Date.now() });
+  });
+  toast(existing ? 'Tauchgang aktualisiert' : rec.planned ? 'Geplanter Tauchgang übernommen' : `Tauchgang #${rec.nr} übernommen`);
+  return `logbuch/${rec.id}`;
+}
+
+async function pageImportPaste() {
+  return {
+    title: 'Code einfügen',
+    back: 'buddys',
+    html: `<div class="card">
+        <p class="meta-line">Halte die Nachricht deines Buddys lange gedrückt → <strong>Kopieren</strong>. Dann hier einfügen.</p>
+        <button type="button" class="btn btn-primary btn-big btn-block" data-paste>${ICON.paste}Aus Zwischenablage einfügen</button>
+        <label class="field"><span class="field-label">oder selbst ins Feld einfügen</span>
+          <span class="field-input"><textarea id="code-input" rows="4" placeholder="Nachricht oder Code (TLB1:…)"></textarea></span></label>
+      </div>
+      <div id="import-preview"></div>`,
+    after(view) {
+      const ta = $('#code-input', view);
+      const out = $('#import-preview', view);
+      const verify = async () => {
+        if (!ta.value.trim()) { out.innerHTML = ''; return; }
+        try {
+          const obj = await decodeShare(ta.value);
+          out.innerHTML = await importPreview(obj);
+          bindImport(out, obj);
+        } catch (e) {
+          out.innerHTML = `<div class="notice"><p>${esc(e.message)}</p></div>`;
+        }
+      };
+      ta.addEventListener('input', verify);
+      $('[data-paste]', view).addEventListener('click', async () => {
+        try {
+          ta.value = await navigator.clipboard.readText();
+          verify();
+        } catch {
+          ta.focus();
+          toast('Bitte lange ins Feld tippen und „Einsetzen“ wählen', 4000);
+        }
+      });
+    },
+  };
+}
+
+// Aufruf über einen geteilten Link (#import=TLB1:…)
+async function pageImportLink(raw) {
+  const code = raw.replace(/%3A/gi, ':');
+  let obj = null;
+  let error = '';
+  try { obj = await decodeShare(code); } catch (e) { error = e.message; }
+  // iPhone-Safari statt installierter App: dort landen die Daten im falschen Speicher
+  const iosBrowser = navigator.standalone === false;
+  return {
+    title: 'Code empfangen',
+    back: 'buddys',
+    html: `${error ? `<div class="notice"><p>${esc(error)}</p></div>` : ''}
+      ${iosBrowser && obj ? `<div class="notice"><p><strong>Du bist in Safari, nicht in der App.</strong> Auf dem iPhone hat die App vom Home-Bildschirm einen eigenen Speicher. Tippe auf „Code kopieren“, öffne die Tauch-Logbuch-App und füge ihn unter Buddys → „Code einfügen“ ein.</p></div>
+        <button type="button" class="btn btn-primary btn-big btn-block" data-copy-code style="margin-bottom:14px">${ICON.copy}Code kopieren</button>` : ''}
+      <div id="import-preview">${obj ? await importPreview(obj) : ''}</div>`,
+    after(view) {
+      const out = $('#import-preview', view);
+      if (iosBrowser) $('[data-apply]', out)?.remove();
+      else if (obj) bindImport(out, obj);
+      $('[data-copy-code]', view)?.addEventListener('click', () => copyText(code.match(SHARE_RE)[0], 'Code kopiert – jetzt in der App einfügen'));
+    },
+  };
 }
 
 /* =========================================================

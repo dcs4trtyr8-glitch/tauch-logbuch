@@ -78,7 +78,16 @@ Die Daten gehören zu genau dieser Adresse auf genau diesem Handy. Sie sind weg,
 - Die App erinnert im Logbuch, wenn das letzte Backup älter als 30 Tage ist.
 - Daten, die du am PC unter `localhost` eingibst, sind getrennt von denen auf dem Handy. Übertragen geht nur per Backup-Datei.
 
-## 5. Später etwas ändern
+## 5. Buddys (ab Version 1.1)
+
+Austausch ganz ohne Server, per Nachricht (z. B. WhatsApp):
+
+- **Buddys → Meine Buddy-Karte teilen:** Name, Tauchstatistik und Brevets (optional mit kleinem Foto). Du wählst aus, was mitgeht. Notfalldaten, Kontakte, Notizen und Tauchgang-Fotos werden nie geteilt.
+- **Tauchgang → Mit Buddy teilen:** geplante oder getauchte Tauchgänge. Der Buddy übernimmt sie mit einem Tipp, und ein erneutes Teilen aktualisiert den Eintrag, statt ihn doppelt anzulegen.
+- **Empfangen:** Nachricht lange drücken → Kopieren → in der App **Buddys → Code einfügen**. Auf dem iPhone öffnet sich ein Link immer in Safari, nicht in der installierten App, deshalb geht es dort über Kopieren und Einfügen.
+- Die Daten eines Buddys sind so aktuell wie der letzte Code, den er geschickt hat.
+
+## 6. Später etwas ändern
 
 1. Dateien hier bearbeiten.
 2. In `sw.js` die Zeile `const CACHE = 'tauch-logbuch-v1';` hochzählen (`v2`, `v3`, …).

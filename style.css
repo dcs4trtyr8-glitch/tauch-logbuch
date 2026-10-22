@@ -146,7 +146,7 @@ main {
   bottom: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   height: calc(var(--tabbar-h) + var(--safe-b));
   padding-bottom: var(--safe-b);
   background: var(--surface);
@@ -159,10 +159,12 @@ main {
   align-items: center;
   justify-content: center;
   gap: 3px;
+  min-width: 0;
   color: var(--muted);
   text-decoration: none;
-  font-size: .78rem;
+  font-size: .7rem;
   font-weight: 600;
+  white-space: nowrap;
 }
 .tabbar svg { width: 27px; height: 27px; }
 .tabbar a.active { color: var(--primary); }
@@ -300,6 +302,37 @@ main {
   font-size: 1.05rem;
   font-variant-numeric: tabular-nums;
 }
+.dive-nr svg { width: 24px; height: 24px; }
+.dive-item.is-planned { border: 2px dashed var(--primary); box-shadow: none; }
+.avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-text);
+  font-weight: 800;
+  font-size: 1.1rem;
+}
+.planned-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 14px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 700;
+}
+.planned-badge svg { width: 20px; height: 20px; }
+.check { display: flex; align-items: flex-start; gap: 12px; margin-top: 16px; cursor: pointer; }
+.check input { flex: none; width: 26px; height: 26px; margin: 1px 0 0; accent-color: var(--primary); }
+.check strong { display: block; }
+.check small { display: block; color: var(--muted); font-size: .88rem; }
+.cert-shared img { display: block; width: 100%; margin-bottom: 10px; border-radius: 10px; cursor: zoom-in; }
 .dive-main { min-width: 0; }
 .dive-site, .dive-date { display: block; }
 .call-text { min-width: 0; }

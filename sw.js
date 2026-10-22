@@ -1,7 +1,7 @@
 /* Service Worker – macht das Logbuch offline nutzbar.
    Bei jeder Änderung an den App-Dateien CACHE hochzählen (v2, v3 …),
    damit Handys die neue Version sicher übernehmen. */
-const CACHE = 'tauch-logbuch-v8';
+const CACHE = 'tauch-logbuch-v10';
 
 // Bewusst ohne "./index.html": manche Server leiten /index.html auf / um,
 // und umgeleitete Antworten dürfen nicht für Seitenaufrufe benutzt werden.
@@ -17,8 +17,10 @@ const ASSETS = [
   './lib/jsQR.js',
 ];
 
+// GitHub Pages erlaubt Browsern, Dateien 10 Minuten zwischenzuspeichern (max-age=600).
+// Deshalb beim Installieren am Browser-Zwischenspeicher vorbei laden, sonst landet evtl. die alte Version im Cache.
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS.map(url => new Request(url, { cache: 'reload' })))));
   self.skipWaiting();
 });
 
@@ -30,7 +32,7 @@ self.addEventListener('activate', event => {
   );
 });
 
-// Erst aus dem Cache antworten (schnell, offline), im Hintergrund aktualisieren.
+// Erst aus dem Cache antworten (schnell, offline), im Hintergrund beim Server nachfragen.
 self.addEventListener('fetch', event => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
@@ -41,7 +43,8 @@ self.addEventListener('fetch', event => {
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const cached = await cache.match(key, { ignoreSearch: true });
-    const network = fetch(req)
+    // "no-cache": Browser fragt beim Server nach, ob sich die Datei geändert hat (unverändert = kurze Antwort)
+    const network = fetch(isPage ? new Request('./', { cache: 'no-cache' }) : new Request(req, { cache: 'no-cache' }))
       .then(res => {
         if (res.ok && !res.redirected) cache.put(key, res.clone());
         return res;

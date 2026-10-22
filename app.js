@@ -5,7 +5,7 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
@@ -1388,7 +1388,12 @@ async function pageSettings() {
         <p class="meta-line">${testMode ? 'Im Testmodus werden nur die Beispieldaten gelöscht.' : 'Löscht alle Tauchgänge, Brevets, Fotos, Kontakte und Notfalldaten auf diesem Gerät.'}</p>
         <button type="button" class="btn btn-outline-danger btn-block" data-act="wipe">${ICON.trash}Alle Daten löschen</button>
       </div>
-      <p class="hint" style="text-align:center;margin-top:20px">Tauch-Logbuch ${APP_VERSION} · alle Daten bleiben auf diesem Gerät</p>`,
+      <h2 class="section-title">App-Version</h2>
+      <div class="card">
+        <p class="meta-line">Installiert: <strong>Tauch-Logbuch ${APP_VERSION}</strong></p>
+        <button type="button" class="btn btn-block" data-act="update">Nach Update suchen</button>
+      </div>
+      <p class="hint" style="text-align:center;margin-top:20px">Alle Daten bleiben auf diesem Gerät.</p>`,
     after(view) {
       view.addEventListener('change', async e => {
         const t = e.target;
@@ -1410,6 +1415,7 @@ async function pageSettings() {
         if (act === 'test-on') setTestMode(true);
         if (act === 'test-off') setTestMode(false);
         if (act === 'test-reset') resetDemo();
+        if (act === 'update') checkForUpdate();
       });
     },
   };
@@ -2474,6 +2480,16 @@ document.addEventListener('keydown', e => {
 $('#back').addEventListener('click', e => goBack(e.currentTarget.dataset.target));
 $('#testbanner-exit').addEventListener('click', () => setTestMode(false));
 
+let updateReloading = false;
+async function checkForUpdate() {
+  const reg = await navigator.serviceWorker?.getRegistration();
+  if (!reg) { toast('Offline-Speicher nicht aktiv – bitte die App mit Internet öffnen.', 4000); return; }
+  toast('Suche nach Update …', 8000);
+  try { await reg.update(); } catch { toast('Keine Verbindung – später noch einmal versuchen.', 4000, true); return; }
+  if (reg.installing || reg.waiting) toast('Update gefunden – wird geladen …', 8000);   // danach lädt die App automatisch neu
+  else toast(`Du hast die neueste Version (${APP_VERSION}).`, 3500);
+}
+
 async function init() {
   try {
     db = await openDB(testMode ? DB_TEST : DB_ECHT);
@@ -2488,7 +2504,20 @@ async function init() {
   router();
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service Worker nicht registriert:', err));
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      // Apps vom Home-Bildschirm werden oft nur fortgesetzt statt neu geladen → beim Zurückkehren nach Updates suchen
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      });
+    }).catch(err => console.warn('Service Worker nicht registriert:', err));
+    // Neue Version aktiv → neu laden (nicht mitten in einem Formular, sonst gingen Eingaben verloren)
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || updateReloading) return;
+      updateReloading = true;
+      if ($('#view form')) toast('Neue Version geladen – bitte die App einmal neu öffnen', 6000);
+      else location.reload();
+    });
   }
 }
 

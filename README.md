@@ -111,4 +111,6 @@ Jedes Handy hat ein eigenes Schlüsselpaar (ECDSA P-256 über die Web-Crypto-Sch
 1. Dateien hier bearbeiten.
 2. In `sw.js` die Zeile `const CACHE = 'tauch-logbuch-v1';` hochzählen (`v2`, `v3`, …).
 3. Geänderte Dateien bei GitHub wieder per **Add file → Upload files** hochladen (gleiche Namen überschreiben).
-4. Auf dem Handy übernimmt die App das Update nach ein- bis zweimal Öffnen mit Internet.
+4. Auf dem Handy sucht die App beim Öffnen bzw. Zurückkehren selbst nach Updates und lädt sich dann automatisch neu (ab 1.4.1). Von Hand: Einstellungen → **Nach Update suchen**.
+
+Hinweis: GitHub Pages erlaubt Browsern, Dateien 10 Minuten zwischenzuspeichern. Der Service Worker lädt beim Installieren deshalb immer frisch vom Server.

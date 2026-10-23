@@ -382,6 +382,72 @@ main {
 .plan-line { fill: none; stroke: var(--primary); stroke-width: 3; }
 .plan-switch { fill: var(--warn); stroke: var(--surface); stroke-width: 2; }
 
+/* Packliste */
+.pack-progress .bar { height: 10px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: var(--surface-2); }
+.pack-progress .bar span { display: block; height: 100%; background: var(--stamp); transition: width .2s; }
+.ok-notice { border: 2px solid var(--stamp); background: var(--surface); color: var(--stamp); font-weight: 700; }
+.pack-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.pack-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 58px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 1.1rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.pack-box {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border);
+  border-radius: 9px;
+  color: #fff;
+  font-weight: 900;
+}
+.pack-item.checked .pack-box { border-color: var(--stamp); background: var(--stamp); }
+.pack-item.checked .pack-text { color: var(--muted); text-decoration: line-through; }
+.pack-badge { margin-left: 4px; padding: 2px 8px; border-radius: 999px; background: var(--primary-soft); color: var(--primary); font-size: .8rem; font-weight: 700; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 2px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-weight: 650;
+  cursor: pointer;
+}
+.chip.active { border-color: var(--primary); background: var(--primary); color: var(--primary-text); }
+.chip svg { width: 18px; height: 18px; }
+.pack-edit { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
+.pack-edit-row { display: grid; grid-template-columns: 1fr 44px 44px 44px; gap: 6px; align-items: center; }
+.pack-edit-row .icon-btn { width: 44px; height: 44px; }
+.pack-edit-row input, .pack-add input {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 1.05rem;
+}
+.pack-add { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 14px; }
+
 /* Digitaler Buddy-Stempel */
 .stamp-card { display: flex; align-items: center; gap: 16px; }
 .stamp {

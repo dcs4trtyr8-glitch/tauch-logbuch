@@ -5,7 +5,7 @@
    Kein Server, kein Login. Fotos werden als Blob gespeichert.
    ========================================================= */
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.5.0';
 const DB_VERSION = 2;                        // v2: Buddys
 const DB_ECHT = 'tauch-logbuch';
 const DB_TEST = 'tauch-logbuch-testmodus';   // eigene Datenbank → Beispieldaten landen nie in den echten Daten
@@ -90,6 +90,7 @@ const ICON = {
   paste: svg('<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 11h6M9 15h4"/>'),
   qr: svg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>'),
   stamp: svg('<path d="M9.5 3h5l-1 7h3.5a2 2 0 0 1 2 2v3H5v-3a2 2 0 0 1 2-2h3.5z"/><path d="M5 19h14"/>'),
+  check: svg('<rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12.5l3 3 5-6"/>'),
 };
 
 /* ---------- Flaschen (ab 1.2 mehrere pro Tauchgang) ---------- */
@@ -506,12 +507,14 @@ function goBack(fallback) {
   if (navStack.length >= 2 && navStack[navStack.length - 2] === fallback) history.back();
   else navigate(fallback, { replace: true });
 }
-function refresh() { keepScrollNext = true; router(); }
+function refresh() { keepScrollNext = true; return router(); }
 
 const ID = '([\\w-]+)';
 const ROUTES = [
   ['logbuch', pageLogbuch],
   ['logbuch/neu', () => pageDiveForm(null)],
+  ['logbuch/packliste', () => pagePack(false)],
+  ['logbuch/packliste/bearbeiten', () => pagePack(true)],
   ['logbuch/plan', () => pageDiveForm(null, { planned: true })],
   [`logbuch/plan/${ID}`, buddyId => pageDiveForm(null, { planned: true, buddyId })],
   [`logbuch/${ID}/bearbeiten`, id => pageDiveForm(id)],
@@ -618,6 +621,8 @@ async function pageLogbuch() {
   const dives = sortDives(all.filter(d => !d.planned));
   const planned = all.filter(d => d.planned)
     .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.time || '').localeCompare(b.time || ''));
+  const packList = activeList(await getPack());
+  const pack = { total: packList.items.length, done: packList.items.filter(i => i.checked).length };
   const total = dives.reduce((s, d) => s + (d.duration || 0), 0);
   const deepest = dives.reduce((b, d) => (d.maxDepth != null && (!b || d.maxDepth > b.maxDepth) ? d : b), null);
 
@@ -643,7 +648,10 @@ async function pageLogbuch() {
           <div class="stat-label">Tiefster</div>${deepest ? `<div class="stat-sub">${esc(deepest.site)}</div>` : ''}</div>
       </div>
       <a class="btn btn-primary btn-big btn-block" href="#logbuch/neu">${ICON.plus}Neuer Tauchgang</a>
-      <a class="btn btn-block" href="#logbuch/plan" style="margin-top:10px">${ICON.calendar}Tauchgang planen</a>
+      <div class="btn-row" style="margin-top:10px">
+        <a class="btn" href="#logbuch/plan">${ICON.calendar}Planen</a>
+        <a class="btn" href="#logbuch/packliste">${ICON.check}Packliste${pack.total ? ` <small class="pack-badge">${pack.done}/${pack.total}</small>` : ''}</a>
+      </div>
       ${planned.length ? `<h2 class="section-title">Geplant</h2><ul class="list" style="margin-top:0">${planned.map(diveItem).join('')}</ul>
         ${dives.length ? '<h2 class="section-title">Logbuch</h2>' : ''}` : ''}
       ${dives.length ? `<ul class="list"${planned.length ? ' style="margin-top:0"' : ''}>${items}</ul>`
@@ -987,7 +995,8 @@ async function pageDiveDetail(id) {
             <p class="stamp-status" data-stamp-status="${i}">Wird geprüft …</p>
           </div>`).join('')}
         <a class="btn btn-primary btn-block" href="#logbuch/${d.id}/stempel">${ICON.stamp}${d.stamps?.length ? 'Weiteren Stempel anfordern' : 'Buddy-Stempel anfordern'}</a>`}
-      ${d.planned ? `<a class="btn btn-primary btn-big btn-block" href="#logbuch/${d.id}/nachtragen" style="margin-top:18px">${ICON.edit}Tauchgang nachtragen</a>` : ''}
+      ${d.planned ? `<a class="btn btn-block" href="#logbuch/packliste" style="margin-top:18px">${ICON.check}Packliste öffnen</a>
+        <a class="btn btn-primary btn-big btn-block" href="#logbuch/${d.id}/nachtragen" style="margin-top:10px">${ICON.edit}Tauchgang nachtragen</a>` : ''}
       <a class="btn btn-block" href="#logbuch/${d.id}/teilen" style="margin-top:${d.planned ? 10 : 18}px">${ICON.share}Mit Buddy teilen</a>
       <div class="btn-row" style="margin-top:10px">
         <button type="button" class="btn btn-outline-danger" data-delete>${ICON.trash}Löschen</button>
@@ -1012,6 +1021,163 @@ async function pageDiveDetail(id) {
         await deleteWithPhotos('dives', d.id, d.photos || []);
         toast('Tauchgang gelöscht');
         goBack('logbuch');
+      });
+    },
+  };
+}
+
+/* ---------- Packliste (abhaken, zurücksetzen, selbst einstellen) ---------- */
+const DEFAULT_PACK = ['Maske', 'Schnorchel', 'Flossen', 'Anzug', 'Füßlinge', 'Handschuhe', 'Kopfhaube', 'Jacket (BCD)',
+  'Atemregler + Oktopus', 'Tauchcomputer', 'Flasche(n)', 'Blei', 'Lampe', 'Boje (SMB)', 'Messer', 'Brevet & Logbuch',
+  'Handtuch & Wechselkleidung', 'Wasser & Snack'];
+
+async function getPack() {
+  let p = await getKV('packlists');
+  if (!p?.lists?.length) {
+    const id = uid();
+    p = { active: id, lists: [{ id, name: 'Tauchtasche', items: DEFAULT_PACK.map(text => ({ id: uid(), text, checked: false })) }] };
+    await setKV('packlists', p);
+  }
+  if (!p.lists.some(l => l.id === p.active)) p.active = p.lists[0].id;
+  return p;
+}
+const activeList = p => p.lists.find(l => l.id === p.active);
+
+async function pagePack(edit) {
+  const p = await getPack();
+  const list = activeList(p);
+  const total = list.items.length;
+  const done = list.items.filter(i => i.checked).length;
+  const chips = p.lists.length > 1 || edit ? `<div class="chips">
+      ${p.lists.map(l => `<button type="button" class="chip${l.id === p.active ? ' active' : ''}" data-list="${l.id}">${esc(l.name)}</button>`).join('')}
+      ${edit ? `<button type="button" class="chip" data-list-add>${ICON.plus}Neue Liste</button>` : ''}
+    </div>` : '';
+
+  const viewHtml = `${chips}
+    <div class="card pack-progress">
+      <div><strong>${done} von ${total}</strong> eingepackt</div>
+      <div class="bar"><span style="width:${total ? Math.round((done / total) * 100) : 0}%"></span></div>
+    </div>
+    ${total && done === total ? '<div class="notice ok-notice"><p>✓ Alles eingepackt – viel Spaß beim Tauchen!</p></div>' : ''}
+    ${total ? `<ul class="pack-list">${list.items.map(i => `<li>
+        <button type="button" class="pack-item${i.checked ? ' checked' : ''}" role="checkbox" aria-checked="${i.checked}" data-toggle="${i.id}">
+          <span class="pack-box">${i.checked ? '✓' : ''}</span><span class="pack-text">${esc(i.text)}</span>
+        </button></li>`).join('')}</ul>`
+      : '<div class="empty"><strong>Die Liste ist leer</strong>Tippe auf „Bearbeiten“ und füge deine Ausrüstung hinzu.</div>'}
+    <div class="btn-row" style="margin-top:16px">
+      <button type="button" class="btn" data-reset${done ? '' : ' disabled'}>Zurücksetzen</button>
+      <a class="btn" href="#logbuch/packliste/bearbeiten">${ICON.edit}Bearbeiten</a>
+    </div>`;
+
+  const editHtml = `${chips}
+    <div class="card">
+      ${field({ label: 'Name der Liste', name: 'listName', value: list.name })}
+      <ul class="pack-edit">${list.items.map((i, idx) => `<li class="pack-edit-row">
+          <input type="text" value="${esc(i.text)}" data-item-text="${i.id}" aria-label="Gegenstand ${idx + 1}" enterkeyhint="done">
+          <button type="button" class="icon-btn" data-item-move="${i.id}" data-dir="-1" aria-label="Nach oben"${idx === 0 ? ' disabled' : ''}>${ICON.up}</button>
+          <button type="button" class="icon-btn" data-item-move="${i.id}" data-dir="1" aria-label="Nach unten"${idx === total - 1 ? ' disabled' : ''}>${ICON.down}</button>
+          <button type="button" class="icon-btn" data-item-del="${i.id}" aria-label="${esc(i.text)} löschen">${ICON.trash}</button>
+        </li>`).join('')}</ul>
+      <form class="pack-add" data-add novalidate>
+        <input type="text" name="newItem" placeholder="z. B. Ersatz-O-Ringe" enterkeyhint="done" aria-label="Neuer Gegenstand">
+        <button type="submit" class="btn btn-primary">${ICON.plus}Dazu</button>
+      </form>
+    </div>
+    ${p.lists.length > 1 ? `<button type="button" class="btn btn-outline-danger btn-block" data-list-del>${ICON.trash}Liste „${esc(list.name)}“ löschen</button>` : ''}
+    <button type="button" class="btn btn-primary btn-big btn-block" data-done style="margin-top:12px">Fertig</button>`;
+
+  return {
+    title: edit ? 'Packliste bearbeiten' : 'Packliste',
+    back: edit ? 'logbuch/packliste' : 'logbuch',
+    html: edit ? editHtml : viewHtml,
+    after(view) {
+      const save = async () => { await setKV('packlists', p); };
+      const item = id => list.items.find(i => i.id === id);
+
+      view.addEventListener('click', async e => {
+        const t = e.target;
+        const chip = t.closest('[data-list]');
+        if (chip) { p.active = chip.dataset.list; await save(); refresh(); return; }
+
+        const tog = t.closest('[data-toggle]');
+        if (tog) {
+          const it = item(tog.dataset.toggle);
+          it.checked = !it.checked;
+          await save();
+          navigator.vibrate?.(15);
+          if (list.items.every(i => i.checked)) toast('Alles eingepackt ✓');
+          refresh();
+          return;
+        }
+        if (t.closest('[data-reset]')) {
+          if (!await confirmDialog({ title: 'Packliste zurücksetzen?', text: 'Alle Haken werden entfernt.', ok: 'Zurücksetzen' })) return;
+          list.items.forEach(i => { i.checked = false; });
+          await save();
+          toast('Liste zurückgesetzt');
+          refresh();
+          return;
+        }
+
+        const mv = t.closest('[data-item-move]');
+        if (mv) {
+          const i = list.items.findIndex(x => x.id === mv.dataset.itemMove);
+          const j = i + Number(mv.dataset.dir);
+          if (j < 0 || j >= list.items.length) return;
+          [list.items[i], list.items[j]] = [list.items[j], list.items[i]];
+          await save();
+          refresh();
+          return;
+        }
+        const del = t.closest('[data-item-del]');
+        if (del) {
+          list.items = list.items.filter(x => x.id !== del.dataset.itemDel);
+          await save();
+          refresh();
+          return;
+        }
+        if (t.closest('[data-list-add]')) {
+          // Neue Liste als Kopie der aktuellen – dann nur noch anpassen
+          const id = uid();
+          p.lists.push({ id, name: `${list.name} (Kopie)`, items: list.items.map(i => ({ id: uid(), text: i.text, checked: false })) });
+          p.active = id;
+          await save();
+          toast('Neue Liste angelegt – Name oben ändern');
+          refresh();
+          return;
+        }
+        if (t.closest('[data-list-del]')) {
+          if (!await confirmDialog({ title: `„${list.name}“ löschen?`, text: 'Die Liste wird endgültig gelöscht.', ok: 'Löschen', danger: true })) return;
+          p.lists = p.lists.filter(l => l.id !== list.id);
+          p.active = p.lists[0].id;
+          await save();
+          refresh();
+          return;
+        }
+        if (t.closest('[data-done]')) goBack('logbuch/packliste');
+      });
+
+      // Umbenennen beim Verlassen des Felds
+      view.addEventListener('change', async e => {
+        const t = e.target;
+        if (t.dataset.itemText) {
+          const it = item(t.dataset.itemText);
+          if (t.value.trim()) it.text = t.value.trim(); else t.value = it.text;
+          await save();
+        }
+        if (t.name === 'listName') {
+          if (t.value.trim()) { list.name = t.value.trim(); await save(); refresh(); } else t.value = list.name;
+        }
+      });
+
+      $('[data-add]', view)?.addEventListener('submit', async e => {
+        e.preventDefault();
+        const input = e.currentTarget.elements.newItem;
+        const text = input.value.trim();
+        if (!text) { input.focus(); return; }
+        list.items.push({ id: uid(), text, checked: false });
+        await save();
+        await refresh();
+        $('#view [name="newItem"]')?.focus();   // gleich den nächsten eintippen
       });
     },
   };

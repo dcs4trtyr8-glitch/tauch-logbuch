@@ -106,6 +106,10 @@ Statt Stempel im Papier-Logbuch:
 
 Jedes Handy hat ein eigenes Schlüsselpaar (ECDSA P-256 über die Web-Crypto-Schnittstelle des Browsers). Der private Schlüssel verlässt das Gerät nie, auch nicht im Backup. Die App erkennt gefälschte Stempel, nachträglich geänderte Tauchgänge und Schlüssel, die nicht zur Buddy-Karte passen. Auf einem neuen Handy entsteht ein neuer Schlüssel; alte Stempel bleiben gültig. Fern-Stempeln geht auch per Nachricht („Anfrage als Nachricht schicken“ bzw. „Als Nachricht“).
 
+## Packliste (ab 1.5)
+
+Logbuch → **Packliste**: Ausrüstung antippen zum Abhaken, oben der Fortschritt. Wenn alles eingepackt ist, erscheint ein Hinweis, und **Zurücksetzen** entfernt alle Haken. Unter **Bearbeiten** fügst du Gegenstände hinzu, benennst sie um, sortierst und löschst sie. Mit „Neue Liste“ legst du weitere Listen an (z. B. Kaltwasser und Urlaub), jeweils als Kopie der aktuellen. Die Packlisten sind im Backup enthalten.
+
 ## 6. Später etwas ändern
 
 1. Dateien hier bearbeiten.
